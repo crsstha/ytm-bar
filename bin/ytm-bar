@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """YouTube Music in the desktop bar — helper for the Omarchy plugin
-(crsstha.ytmusic). Talks to Pear Desktop's API Server plugin on localhost.
+(crsstha.ytmusic). Plays YouTube Music without the app: ytmusicapi for search
+and radio, mpv + yt-dlp for the audio.
 
-  ytm-bar auth            Ask Pear for an access token (approve the dialog in
-                          YouTube Music) and save it to ~/.config/ytm-bar/token.
+  ytm-bar daemon          Run the player service (systemd: ytm-bar.service).
+                          It owns mpv and the queue, and serves the commands
+                          below on 127.0.0.1.
+  ytm-bar start           Start the service, unless it's running.
+  ytm-bar login           Connect your YouTube Music account (likes, personal
+                          radio): paste request headers from your browser.
+  ytm-bar logout          Forget the account.
+  ytm-bar song            The current song, as JSON.
   ytm-bar state           Like / shuffle / repeat / volume and the queue, as JSON.
   ytm-bar queue           The queue only, as JSON.
   ytm-bar toggle | next | previous | like | dislike | shuffle | repeat
@@ -11,45 +18,60 @@
   ytm-bar volume PERCENT  Set the volume (0-100).
   ytm-bar jump INDEX      Play the queue item at INDEX.
   ytm-bar search QUERY    Songs and videos matching QUERY, as JSON.
-  ytm-bar play VIDEO_ID   Play a search result now (after the current song).
-  ytm-bar add VIDEO_ID    Queue a search result to play next.
-  ytm-bar start           Launch YouTube Music hidden, unless it's running.
-  ytm-bar window          Show/hide the YouTube Music window (it lives on the
-                          hidden special:music workspace); launch it if needed.
+  ytm-bar play VIDEO_ID   Play a song now, followed by its radio.
+  ytm-bar add VIDEO_ID    Queue a song to play next.
 
-Every command prints one JSON object with "ok", plus "error" and "code"
-("offline", "unauthorized", "failed") when it didn't work. The live
-now-playing display polls GET /api/v1/song directly from Panel.qml.
+Every command except daemon and login prints one JSON object with "ok", plus
+"error" and "code" ("offline", "unauthorized", "failed") when it didn't work.
+The live now-playing display polls GET /song directly from Panel.qml.
 """
 
 import json
 import os
+import random
+import re
+import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-PORT = int(os.environ.get("YTM_BAR_PORT", "26538"))
+PORT = int(os.environ.get("YTM_BAR_PORT", "26539"))
 API = f"http://127.0.0.1:{PORT}"
+# Every request must carry this header. A web page can't add it without a CORS
+# preflight, which the service never answers, so browsers can't drive it.
+HEADER = "X-Ytm-Bar"
 CONFIG = Path.home() / ".config/ytm-bar"
-TOKEN = CONFIG / "token"
-CLIENT_ID = "ytm-bar"
+AUTH_FILE = CONFIG / "browser.json"
+STATE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "ytm-bar/state.json"
+MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock"
+SERVICE = "ytm-bar.service"
+WATCH_URL = "https://music.youtube.com/watch?v="
 QUEUE_LIMIT = 10
-SEARCH_LIMIT = 10
-SEARCH_KINDS = ("Song", "Video")
-WINDOW_CLASS = "com.github.th-ch.youtube-music"
-WORKSPACE = "music"  # special:music, see omarchy/bindings.lua
+SONG_RESULTS = 7
+VIDEO_RESULTS = 3
+RADIO_LIMIT = 25
+RADIO_AHEAD = 3  # fetch more radio when this few songs are left
+REPEAT_MODES = ["NONE", "ALL", "ONE"]
+LIKE_STATES = ("LIKE", "DISLIKE", "INDIFFERENT")
 
-ACTIONS = {
-    "toggle": "toggle-play",
-    "next": "next",
-    "previous": "previous",
-    "like": "like",
-    "dislike": "dislike",
-    "shuffle": "shuffle",
+USAGE = {
+    "seek": "Usage: ytm-bar seek NUMBER",
+    "volume": "Usage: ytm-bar volume NUMBER",
+    "jump": "Usage: ytm-bar jump NUMBER",
+    "search": "Usage: ytm-bar search QUERY",
+    "play": "Usage: ytm-bar play VIDEO_ID",
+    "add": "Usage: ytm-bar add VIDEO_ID",
 }
+COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
+            "shuffle", "repeat", *USAGE}
 
 
 class ApiError(Exception):
@@ -58,182 +80,580 @@ class ApiError(Exception):
         self.code = code
 
 
-def read_token():
-    try:
-        return TOKEN.read_text().strip()
-    except OSError:
+# ---- Turning ytmusicapi's results into the rows the panel shows.
+
+def artists_of(item):
+    return ", ".join(a["name"] for a in item.get("artists") or [] if a.get("name"))
+
+
+def clock(seconds):
+    seconds = int(seconds or 0)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def seconds_of(text):
+    """"3:05" or "1:02:03" -> seconds; 0 when there's no length."""
+    total = 0
+    for part in (text or "").split(":"):
+        if not part.isdigit():
+            return 0
+        total = total * 60 + int(part)
+    return total
+
+
+def image_of(item):
+    """The largest thumbnail. Album art URLs carry their size (=w60-h60), so ask
+    for a bigger square instead."""
+    thumbs = item.get("thumbnails") or item.get("thumbnail") or []
+    if not thumbs:
         return ""
+    url = max(thumbs, key=lambda t: t.get("width") or 0).get("url", "")
+    return re.sub(r"=w\d+-h\d+", "=w544-h544", url)
 
 
-def save_token(token):
-    CONFIG.mkdir(parents=True, exist_ok=True)
-    tmp = TOKEN.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(token + "\n")
-    tmp.replace(TOKEN)
+def track_of(item):
+    """A search result or radio track, reduced to what the player needs."""
+    length = item.get("duration") or item.get("length") or ""
+    duration = item.get("duration_seconds") or seconds_of(length)
+    return {
+        "videoId": item["videoId"],
+        "title": item.get("title") or "",
+        "artist": artists_of(item),
+        "album": (item.get("album") or {}).get("name") or "",
+        "length": length or (clock(duration) if duration else ""),
+        "duration": duration,
+        "image": image_of(item),
+        "like": item.get("likeStatus") if item.get("likeStatus") in LIKE_STATES else None,
+    }
 
 
-def request(method, path, body=None, timeout=5, auth=True):
+def search_row(item, kind):
+    detail = [artists_of(item)]
+    if kind == "Video" and item.get("views"):
+        detail.append(item["views"] + " views")
+    elif item.get("duration"):
+        detail.append(item["duration"])
+    return {"videoId": item["videoId"], "title": item.get("title") or "", "kind": kind,
+            "detail": " · ".join(d for d in detail if d)}
+
+
+def merge_results(songs, videos):
+    """Songs first, then a few videos; skip anything without a videoId and repeats."""
+    results, seen = [], set()
+    for items, kind, limit in ((songs, "Song", SONG_RESULTS), (videos, "Video", VIDEO_RESULTS)):
+        count = 0
+        for item in items or []:
+            video_id = item.get("videoId")
+            if not video_id or video_id in seen or count == limit:
+                continue
+            seen.add(video_id)
+            results.append(search_row(item, kind))
+            count += 1
+    return results
+
+
+def video_id_of(url):
+    match = re.search(r"[?&]v=([\w-]{11})", url or "")
+    return match.group(1) if match else None
+
+
+# ---- The service: mpv over its JSON IPC socket.
+
+class Mpv:
+    """One mpv process with no video, driven through --input-ipc-server.
+    mpv-mpris (if installed) gives it media keys and an MPRIS player."""
+
+    def __init__(self, volume, on_event):
+        self.on_event = on_event
+        self.lock = threading.Lock()
+        self.waiting = {}
+        self.next_id = 0
+        MPV_SOCKET.unlink(missing_ok=True)
+        self.proc = subprocess.Popen([
+            "mpv", "--idle=yes", "--no-video", "--no-terminal", "--audio-display=no",
+            f"--input-ipc-server={MPV_SOCKET}", "--ytdl-format=bestaudio/best",
+            "--prefetch-playlist=yes", f"--volume={volume}",
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                self.sock = socket.socket(socket.AF_UNIX)
+                self.sock.connect(str(MPV_SOCKET))
+                break
+            except OSError:
+                self.sock.close()
+                if self.proc.poll() is not None or time.monotonic() > deadline:
+                    raise ApiError("failed", "mpv didn't start")
+                time.sleep(0.05)
+        threading.Thread(target=self.read, daemon=True).start()
+
+    @property
+    def alive(self):
+        return self.proc.poll() is None
+
+    def read(self):
+        buffer = b""
+        while True:
+            try:
+                chunk = self.sock.recv(65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if "request_id" in message:
+                    slot = self.waiting.get(message["request_id"])
+                    if slot:
+                        slot.append(message)
+                        slot[0].set()
+                elif "event" in message:
+                    # Never block the reader: handlers send commands of their own.
+                    threading.Thread(target=self.on_event, args=(message,), daemon=True).start()
+        for slot in list(self.waiting.values()):
+            slot[0].set()
+
+    def command(self, *args):
+        with self.lock:
+            self.next_id += 1
+            request_id = self.next_id
+            slot = [threading.Event()]
+            self.waiting[request_id] = slot
+            try:
+                self.sock.sendall(json.dumps({"command": list(args), "request_id": request_id}).encode() + b"\n")
+            except OSError:
+                del self.waiting[request_id]
+                raise ApiError("failed", "mpv stopped")
+        slot[0].wait(5)
+        self.waiting.pop(request_id, None)
+        if len(slot) < 2:
+            raise ApiError("failed", "mpv didn't answer")
+        reply = slot[1]
+        if reply.get("error") not in ("success", "property unavailable"):
+            raise ApiError("failed", f"mpv: {reply.get('error')}")
+        return reply.get("data")
+
+    def get(self, name, default=None):
+        value = self.command("get_property", name)
+        return default if value is None else value
+
+    def set(self, name, value):
+        self.command("set_property", name, value)
+
+    def quit(self):
+        try:
+            self.command("quit")
+        except ApiError:
+            pass
+        self.proc.terminate()
+
+
+class Player:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.mpv = None
+        self.tracks = {}  # videoId -> track_of(...)
+        self.radio_seeds = set()
+        self.shuffle = False
+        self.repeat = "NONE"
+        self.volume = 70
+        self._yt = None
+        self._yt_auth = None
+        try:
+            self.volume = int(json.loads(STATE_FILE.read_text()).get("volume", self.volume))
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    # -- ytmusicapi, signed in when ytm-bar login saved headers.
+
+    @property
+    def logged_in(self):
+        return AUTH_FILE.exists()
+
+    def yt(self):
+        auth = AUTH_FILE.stat().st_mtime if self.logged_in else None
+        if self._yt is None or auth != self._yt_auth:
+            from ytmusicapi import YTMusic
+            try:
+                self._yt = YTMusic(str(AUTH_FILE)) if auth else YTMusic()
+            except Exception as e:
+                raise ApiError("unauthorized", f"Couldn't read the login — run ytm-bar login ({e})")
+            self._yt_auth = auth
+        return self._yt
+
+    def call(self, name, *args, **kwargs):
+        try:
+            return getattr(self.yt(), name)(*args, **kwargs)
+        except ApiError:
+            raise
+        except Exception as e:
+            raise ApiError("failed", f"YouTube Music: {e}")
+
+    # -- mpv, started on first use.
+
+    def player(self, start=True):
+        with self.lock:
+            if self.mpv and not self.mpv.alive:
+                self.mpv = None
+            if self.mpv is None and start:
+                self.mpv = Mpv(self.volume, self.on_event)
+                self.mpv.command("observe_property", 1, "playlist-pos")
+                self.apply_repeat()
+            return self.mpv
+
+    def on_event(self, message):
+        if message.get("event") == "property-change" and message.get("name") == "playlist-pos":
+            self.song_changed(message.get("data"))
+
+    def playlist(self):
+        mpv = self.player(start=False)
+        return (mpv.get("playlist", []) if mpv else []), mpv
+
+    def current_index(self, playlist):
+        return next((i for i, item in enumerate(playlist) if item.get("current")), -1)
+
+    def song_changed(self, position):
+        try:
+            playlist, _ = self.playlist()
+            if position is None or position < 0 or position >= len(playlist):
+                return
+            video_id = video_id_of(playlist[position].get("filename"))
+            if len(playlist) - position <= RADIO_AHEAD and video_id:
+                self.extend_radio(video_id, playlist)
+            track = self.tracks.get(video_id)
+            if video_id and self.logged_in and (track is None or track["like"] is None):
+                self.fetch_track(video_id)
+        except ApiError:
+            pass
+
+    def extend_radio(self, video_id, playlist):
+        """Like YouTube Music's autoplay: when the queue runs low, append the
+        radio for the current song."""
+        with self.lock:
+            if video_id in self.radio_seeds or self.repeat != "NONE":
+                return
+            self.radio_seeds.add(video_id)
+        radio = self.call("get_watch_playlist", videoId=video_id, limit=RADIO_LIMIT)
+        queued = {video_id_of(item.get("filename")) for item in playlist}
+        for item in radio.get("tracks") or []:
+            if not item.get("videoId"):
+                continue
+            track = track_of(item)
+            self.tracks.setdefault(track["videoId"], track).update(
+                {k: v for k, v in track.items() if v is not None})
+            if track["videoId"] not in queued:
+                queued.add(track["videoId"])
+                self.player().command("loadfile", WATCH_URL + track["videoId"], "append")
+
+    def fetch_track(self, video_id):
+        """Details (and the like state) for a song that didn't come from search or radio."""
+        tracks = self.call("get_watch_playlist", videoId=video_id, limit=1).get("tracks") or []
+        for item in tracks:
+            if item.get("videoId") == video_id:
+                track = track_of(item)
+                track["like"] = track["like"] or "INDIFFERENT"
+                self.tracks[video_id] = track
+
+    # -- What the panel reads.
+
+    def current(self):
+        playlist, mpv = self.playlist()
+        index = self.current_index(playlist)
+        if index < 0 or mpv.get("idle-active", False):
+            return None, mpv
+        item = playlist[index]
+        video_id = video_id_of(item.get("filename"))
+        track = self.tracks.get(video_id) or {
+            "videoId": video_id, "title": item.get("title") or mpv.get("media-title", ""),
+            "artist": "", "album": "", "length": "", "duration": 0, "image": "", "like": None}
+        return track, mpv
+
+    def song(self, args):
+        track, mpv = self.current()
+        if track is None:
+            return None
+        return {
+            "videoId": track["videoId"],
+            "title": track["title"],
+            "artist": track["artist"],
+            "album": track["album"],
+            "imageSrc": track["image"],
+            "songDuration": mpv.get("duration", 0) or track["duration"],
+            "elapsedSeconds": mpv.get("time-pos", 0),
+            "isPaused": mpv.get("pause", False),
+        }
+
+    def queue(self, args):
+        playlist, _ = self.playlist()
+        start = max(0, self.current_index(playlist))
+        rows = []
+        for index, item in enumerate(playlist[start:start + QUEUE_LIMIT + 1], start):
+            track = self.tracks.get(video_id_of(item.get("filename"))) or {}
+            rows.append({
+                "index": index,
+                "title": track.get("title") or item.get("title") or item.get("filename"),
+                "artist": track.get("artist", ""),
+                "length": track.get("length", ""),
+                "current": bool(item.get("current")),
+            })
+        return {"queue": rows}
+
+    def state(self, args):
+        track, mpv = self.current()
+        return {
+            "like": (track or {}).get("like") or "INDIFFERENT",
+            "shuffle": self.shuffle,
+            "repeat": self.repeat,
+            "volume": self.volume,
+            "muted": bool(mpv and mpv.get("mute", False)),
+            "loggedIn": self.logged_in,
+            **self.queue(args),
+        }
+
+    # -- Controls.
+
+    def toggle(self, args):
+        if self.current()[0] is not None:
+            self.mpv.command("cycle", "pause")
+
+    def next(self, args):
+        if self.current()[0] is not None:
+            self.mpv.command("playlist-next")
+
+    def previous(self, args):
+        """Back to the start of the song, or the previous one if it just began."""
+        track, mpv = self.current()
+        if track is None:
+            return
+        if mpv.get("time-pos", 0) > 3 or mpv.get("playlist-pos", 0) == 0:
+            mpv.command("seek", 0, "absolute")
+        else:
+            mpv.command("playlist-prev")
+
+    def rate(self, rating):
+        track, _ = self.current()
+        if track is None:
+            return
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in to like songs: run ytm-bar login in a terminal")
+        new = "INDIFFERENT" if track.get("like") == rating else rating
+        self.call("rate_song", track["videoId"], new)
+        track["like"] = new
+        self.tracks[track["videoId"]] = track
+        return new
+
+    def like(self, args):
+        self.rate("LIKE")
+
+    def dislike(self, args):
+        # Like YouTube Music: disliking a song skips it.
+        if self.rate("DISLIKE") == "DISLIKE":
+            self.next(args)
+
+    def shuffle_(self, args):
+        """Shuffle what's left of the queue (turning it off keeps the order)."""
+        with self.lock:
+            self.shuffle = not self.shuffle
+            playlist, mpv = self.playlist()
+            if not self.shuffle or not mpv:
+                return
+            start = self.current_index(playlist) + 1
+            for target in range(start, len(playlist) - 1):
+                source = random.randint(target, len(playlist) - 1)
+                if source != target:
+                    mpv.command("playlist-move", source, target)
+
+    def apply_repeat(self):
+        if self.mpv:
+            self.mpv.set("loop-playlist", "inf" if self.repeat == "ALL" else "no")
+            self.mpv.set("loop-file", "inf" if self.repeat == "ONE" else "no")
+
+    def repeat_(self, args):
+        with self.lock:
+            self.repeat = REPEAT_MODES[(REPEAT_MODES.index(self.repeat) + 1) % len(REPEAT_MODES)]
+            self.apply_repeat()
+
+    def seek(self, args):
+        if self.current()[0] is not None:
+            self.mpv.command("seek", float(args[0]), "absolute")
+
+    def volume_(self, args):
+        self.volume = int(min(100, max(0, float(args[0]))))
+        mpv = self.player(start=False)
+        if mpv:
+            mpv.set("volume", self.volume)
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps({"volume": self.volume}))
+        except OSError:
+            pass
+
+    def jump(self, args):
+        playlist, mpv = self.playlist()
+        index = int(float(args[0]))
+        if mpv and 0 <= index < len(playlist):
+            mpv.command("playlist-play-index", index)
+            mpv.set("pause", False)
+
+    def search(self, args):
+        query = " ".join(args).strip()
+        with ThreadPoolExecutor(2) as pool:
+            songs = pool.submit(self.call, "search", query, filter="songs", limit=SONG_RESULTS)
+            videos = pool.submit(self.call, "search", query, filter="videos", limit=VIDEO_RESULTS)
+            songs, videos = songs.result(), videos.result()
+        for item in (songs or []) + (videos or []):
+            if item.get("videoId"):
+                self.tracks.setdefault(item["videoId"], track_of(item))
+        return {"results": merge_results(songs, videos)}
+
+    def play(self, args):
+        """Start a fresh queue with this song; its radio follows."""
+        video_id = args[0]
+        mpv = self.player()
+        with self.lock:
+            self.radio_seeds.discard(video_id)
+        mpv.command("loadfile", WATCH_URL + video_id, "replace")
+        mpv.set("pause", False)
+
+    def add(self, args):
+        """Play next — or now, if nothing is playing."""
+        mpv = self.player()
+        idle = self.current()[0] is None
+        mpv.command("loadfile", WATCH_URL + args[0], "append-play" if idle else "insert-next")
+
+    def run(self, command, args):
+        handler = getattr(self, command + "_", None) or getattr(self, command, None)
+        if command not in COMMANDS or handler is None:
+            raise ApiError("failed", f"Unknown command {command!r}")
+        return handler(args)
+
+
+def serve():
+    player = Player()
+
+    class Handler(BaseHTTPRequestHandler):
+        def reply(self, status, body=None):
+            data = json.dumps(body).encode() if body is not None else b""
+            self.send_response(status)
+            if data:
+                self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def allowed(self):
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+            if self.headers.get(HEADER) is None or host not in ("127.0.0.1", "localhost"):
+                self.reply(403, {"ok": False, "code": "failed", "error": "Forbidden"})
+                return False
+            return True
+
+        def do_GET(self):
+            # Panel.qml's poll: 200 with the song, 204 when nothing is loaded.
+            if not self.allowed():
+                return
+            if urllib.parse.urlsplit(self.path).path != "/song":
+                return self.reply(404, {"ok": False, "code": "failed", "error": "Not found"})
+            try:
+                song = player.song([])
+            except ApiError as e:
+                return self.reply(500, {"ok": False, "code": e.code, "error": str(e)})
+            self.reply(200, song) if song else self.reply(204)
+
+        def do_POST(self):
+            if not self.allowed():
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                args = json.loads(self.rfile.read(length) or b"{}").get("args") or []
+                command = self.path.strip("/")
+                result = player.run(command, [str(a) for a in args])
+                if command == "song":
+                    result = {"song": result}
+                body = {"ok": True, **(result or {})}
+            except ApiError as e:
+                body = {"ok": False, "code": e.code, "error": str(e)}
+            except (ValueError, IndexError) as e:
+                body = {"ok": False, "code": "failed", "error": f"Bad request: {e}"}
+            self.reply(200, body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server.daemon_threads = True
+    # Stopping the service (SIGTERM) also stops mpv.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        server.serve_forever()
+    finally:
+        if player.mpv:
+            player.mpv.quit()
+
+
+# ---- The command line: a thin client of the service.
+
+def request(method, path, body=None, timeout=5):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
+    req = urllib.request.Request(API + path, data=data, method=method, headers={HEADER: "1"})
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    if auth:
-        token = read_token()
-        if not token:
-            raise ApiError("unauthorized", "Not connected — run ytm-bar auth")
-        req.add_header("Authorization", "Bearer " + token)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            raise ApiError("unauthorized", "YouTube Music rejected the token — run ytm-bar auth")
-        raise ApiError("failed", f"YouTube Music returned HTTP {e.code}")
+        raise ApiError("failed", f"ytm-bar service returned HTTP {e.code}")
     except (urllib.error.URLError, ConnectionError, TimeoutError):
-        raise ApiError("offline", "YouTube Music isn't running (or its API Server plugin is off)")
+        raise ApiError("offline", "The ytm-bar service isn't running — run ytm-bar start")
 
 
-def text_of(node):
-    """YouTube renderer text: {"runs": [{"text": ...}]} or {"simpleText": ...}."""
-    if not isinstance(node, dict):
-        return ""
-    if "simpleText" in node:
-        return node["simpleText"]
-    return "".join(run.get("text", "") for run in node.get("runs", []))
-
-
-def simplify_queue(raw):
-    """Reduce Pear's raw YouTube queue object to the rows the panel shows:
-    the current song and the next QUEUE_LIMIT songs after it."""
-    items = (raw or {}).get("items") or []
-    rows = []
-    for index, item in enumerate(items):
-        video = item.get("playlistPanelVideoRenderer")
-        if video is None:
-            wrapper = item.get("playlistPanelVideoWrapperRenderer") or {}
-            video = (wrapper.get("primaryRenderer") or {}).get("playlistPanelVideoRenderer")
-        if not video:
-            continue
-        rows.append({
-            "index": index,
-            "title": text_of(video.get("title")),
-            "artist": text_of(video.get("shortBylineText")),
-            "length": text_of(video.get("lengthText")),
-            "current": bool(video.get("selected")),
-        })
-    current = next((i for i, row in enumerate(rows) if row["current"]), 0)
-    return rows[current:current + QUEUE_LIMIT + 1]
-
-
-def queue():
-    return simplify_queue(request("GET", "/api/v1/queue"))
-
-
-def list_items(node, found):
-    """Every musicResponsiveListItemRenderer in a search response, in order."""
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key == "musicResponsiveListItemRenderer":
-                found.append(value)
-            list_items(value, found)
-    elif isinstance(node, list):
-        for value in node:
-            list_items(value, found)
-    return found
-
-
-def simplify_search(raw):
-    """Reduce Pear's raw YouTube search response to playable songs/videos.
-    A result's second column reads "Song • Artist" (or "Song • 4:53" in the
-    top-result card); albums, artists and playlists have no videoId."""
-    results, seen = [], set()
-    for item in list_items(raw, []):
-        video_id = (item.get("playlistItemData") or {}).get("videoId")
-        columns = [text_of((col.get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text"))
-                   for col in item.get("flexColumns") or []]
-        if not video_id or video_id in seen or not columns:
-            continue
-        parts = [p.strip() for p in (columns[1] if len(columns) > 1 else "").split("•") if p.strip()]
-        kind = parts[0] if parts else ""
-        if kind not in SEARCH_KINDS:
-            continue
-        seen.add(video_id)
-        results.append({"videoId": video_id, "title": columns[0], "kind": kind,
-                        "detail": " · ".join(parts[1:])})
-        if len(results) == SEARCH_LIMIT:
-            break
-    return results
-
-
-def search(words):
-    query = " ".join(words).strip()
-    if not query:
-        raise ApiError("failed", "Usage: ytm-bar search QUERY")
-    return simplify_search(request("POST", "/api/v1/search", {"query": query}, timeout=20))
-
-
-def enqueue(args, name, position):
-    if not args or not args[0]:
-        raise ApiError("failed", f"Usage: ytm-bar {name} VIDEO_ID")
-    request("POST", "/api/v1/queue", {"videoId": args[0], "insertPosition": position})
-
-
-def state():
-    like = request("GET", "/api/v1/like-state") or {}
-    shuffle = request("GET", "/api/v1/shuffle") or {}
-    repeat = request("GET", "/api/v1/repeat-mode") or {}
-    volume = request("GET", "/api/v1/volume") or {}
-    return {
-        "like": like.get("state") or "INDIFFERENT",
-        "shuffle": bool(shuffle.get("state")),
-        "repeat": repeat.get("mode") or "NONE",
-        "volume": volume.get("state", 0),
-        "muted": bool(volume.get("isMuted")),
-        "queue": queue(),
-    }
-
-
-def auth():
-    # Pear shows an approve dialog and holds the request until you answer.
-    result = request("POST", f"/auth/{CLIENT_ID}", timeout=120, auth=False) or {}
-    token = result.get("accessToken")
-    if not token:
-        raise ApiError("failed", "YouTube Music didn't return a token")
-    save_token(token)
-    return {}
-
-
-def app_window_open():
+def running():
     try:
-        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5).stdout
-        return any(c.get("class") == WINDOW_CLASS for c in json.loads(out or "[]"))
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return False
+        request("GET", "/song", timeout=1)
+        return True
+    except ApiError as e:
+        return e.code != "offline"
 
 
 def start():
-    """Launch YouTube Music (hidden, by the window rule) unless it's running."""
-    if app_window_open():
+    if running():
         return {}
-    subprocess.Popen(["uwsm-app", "--", "youtube-music"], start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 20
-    while not app_window_open():
+    started = subprocess.run(["systemctl", "--user", "start", SERVICE], capture_output=True).returncode == 0
+    if not started:  # not installed as a unit: run it detached instead
+        subprocess.Popen([os.path.realpath(sys.argv[0]), "daemon"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 10
+    while not running():
         if time.monotonic() > deadline:
-            raise ApiError("failed", "YouTube Music didn't open a window")
-        time.sleep(0.25)
+            raise ApiError("failed", "The ytm-bar service didn't start — see journalctl --user -u ytm-bar")
+        time.sleep(0.1)
     return {}
 
 
-def window():
-    # The window rule sends YouTube Music to the hidden special workspace, so
-    # "show" means toggling that workspace — after launching the app if needed.
-    start()
-    subprocess.run(["hyprctl", "dispatch", f'hl.dsp.workspace.toggle_special("{WORKSPACE}")'],
-                   capture_output=True, timeout=5)
+def login():
+    from ytmusicapi import setup
+    print("Connect ytm-bar to your YouTube Music account:\n"
+          "  1. Open https://music.youtube.com in your browser, signed in.\n"
+          "  2. Open the developer tools (F12) → Network, and reload the page.\n"
+          "  3. Find a POST request to \"browse\", right-click → Copy → Copy request headers.\n"
+          "  4. Paste them below, then press Enter and Ctrl+D.\n", file=sys.stderr)
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    try:
+        setup(filepath=str(AUTH_FILE))
+    except Exception as e:
+        raise ApiError("unauthorized", f"Couldn't use those headers: {e}")
+    AUTH_FILE.chmod(0o600)
+    return {}
+
+
+def logout():
+    AUTH_FILE.unlink(missing_ok=True)
     return {}
 
 
@@ -241,51 +661,40 @@ def number(args, name):
     try:
         return float(args[0])
     except (IndexError, ValueError):
-        raise ApiError("failed", f"Usage: ytm-bar {name} NUMBER")
+        raise ApiError("failed", USAGE[name])
 
 
 def run(command, args):
-    if command == "auth":
-        return auth()
-    if command == "state":
-        return state()
-    if command == "queue":
-        return {"queue": queue()}
-    if command in ACTIONS:
-        request("POST", "/api/v1/" + ACTIONS[command])
-        return {}
-    if command == "repeat":
-        request("POST", "/api/v1/switch-repeat", {"iteration": 1})
-        return {}
-    if command == "seek":
-        request("POST", "/api/v1/seek-to", {"seconds": max(0, number(args, "seek"))})
-        return {}
-    if command == "volume":
-        request("POST", "/api/v1/volume", {"volume": min(100, max(0, number(args, "volume")))})
-        return {}
-    if command == "jump":
-        request("PATCH", "/api/v1/queue", {"index": int(number(args, "jump"))})
-        return {}
-    if command == "search":
-        return {"results": search(args)}
-    if command == "play":
-        enqueue(args, "play", "INSERT_AFTER_CURRENT_VIDEO")
-        request("POST", "/api/v1/next")
-        return {}
-    if command == "add":
-        enqueue(args, "add", "INSERT_AFTER_CURRENT_VIDEO")
-        return {}
     if command == "start":
         return start()
-    if command == "window":
-        return window()
-    raise ApiError("failed", f"Unknown command {command!r} — see ytm-bar --help")
+    if command == "login":
+        return login()
+    if command == "logout":
+        return logout()
+    if command not in COMMANDS:
+        raise ApiError("failed", f"Unknown command {command!r} — see ytm-bar --help")
+    if command in ("seek", "volume", "jump"):
+        args = [str(number(args, command))]
+    elif command == "search":
+        args = [" ".join(args).strip()]
+        if not args[0]:
+            raise ApiError("failed", USAGE["search"])
+    elif command in ("play", "add") and not (args and args[0]):
+        raise ApiError("failed", USAGE[command])
+    result = request("POST", "/" + command, {"args": args}, timeout=30 if command == "search" else 10)
+    if not result.get("ok"):
+        raise ApiError(result.get("code", "failed"), result.get("error", "Failed"))
+    result.pop("ok")
+    return result
 
 
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
+        return 0
+    if args[0] == "daemon":
+        serve()
         return 0
     try:
         result = {"ok": True, **run(args[0], args[1:])}

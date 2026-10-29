@@ -133,13 +133,13 @@ BarWidget {
         renderType: Text.NativeRendering
       }
     }
-    // Dimmed unless something is playing (paused, not connected, app closed).
+    // Dimmed unless something is playing (paused, or the player is stopped).
     dimmed: panelLoader.item ? panelLoader.item.dimmed === true : false
     tooltipText: panelLoader.item ? panelLoader.item.tooltip : ""
 
     onPressed: function(b) {
       if (!root.bar || !panelLoader.item) return
-      if (b === Qt.RightButton) panelLoader.item.showWindow()
+      if (b === Qt.RightButton) root.open()  // straight to the search box
       else if (b === Qt.MiddleButton) root.action("toggle")
       else root.togglePanel()
     }

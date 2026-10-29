@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "crsstha.ytmusic",
   "name": "YouTube Music",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "crsstha",
-  "description": "Now playing in YouTube Music (Pear Desktop) with controls and the up-next queue. Talks to Pear's API Server plugin; actions go through bin/ytm-bar.",
+  "description": "Now playing in YouTube Music with controls, search and the up-next queue. Plays through mpv + yt-dlp, with ytmusicapi for search and radio; bin/ytm-bar runs the player service.",
   "kinds": [
     "bar-widget"
   ],
