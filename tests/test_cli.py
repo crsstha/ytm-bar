@@ -1,9 +1,13 @@
-"""Checks ytm-bar's queue parsing and error JSON:  python3 tests/test_cli.py"""
+"""Checks ytm-bar's result parsing, the service's request guard and error JSON:
+python3 tests/test_cli.py   (needs no network, mpv or ytmusicapi)"""
 import json
 import os
 import socket
 import subprocess
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -13,100 +17,102 @@ spec = spec_from_loader("ytm_bar", SourceFileLoader("ytm_bar", CLI))
 bar = module_from_spec(spec)
 spec.loader.exec_module(bar)
 
+assert bar.seconds_of("3:05") == 185
+assert bar.seconds_of("1:02:03") == 3723
+assert bar.seconds_of("") == 0 and bar.seconds_of("live") == 0
+assert bar.clock(185) == "3:05"
+assert bar.video_id_of("https://music.youtube.com/watch?v=12rsVkwSsXU") == "12rsVkwSsXU"
+assert bar.video_id_of("https://example.com/a.mp3") is None
 
-def video(title, selected=False):
-    return {
-        "title": {"runs": [{"text": title}]},
-        "shortBylineText": {"runs": [{"text": "Artist " + title}]},
-        "lengthText": {"simpleText": "3:00"},
-        "selected": selected,
-    }
+# Album art asks for a bigger square; video thumbnails take the widest.
+assert bar.image_of({"thumbnails": [{"url": "https://lh3/x=w60-h60-l90-rj", "width": 60},
+                                    {"url": "https://lh3/x=w120-h120-l90-rj", "width": 120}]}) \
+    == "https://lh3/x=w544-h544-l90-rj"
+assert bar.image_of({"thumbnail": [{"url": "a.jpg", "width": 400}, {"url": "b.jpg", "width": 800}]}) == "b.jpg"
+assert bar.image_of({}) == ""
+
+mitski = [{"name": "Mitski", "id": "UC1"}]
+# A search result (duration, album) and a radio track (length, likeStatus).
+song = {"videoId": "12rsVkwSsXU", "title": "Washing Machine Heart", "artists": mitski,
+        "album": {"name": "Be the Cowboy"}, "duration": "2:09", "duration_seconds": 129,
+        "thumbnails": [{"url": "https://lh3/a=w60-h60", "width": 60}], "resultType": "song"}
+radio = {"videoId": "nonJBN_w9Z0", "title": "I Bet on Losing Dogs", "length": "2:51",
+         "artists": mitski, "likeStatus": "LIKE", "thumbnail": [{"url": "t.jpg", "width": 400}]}
+assert bar.track_of(song) == {"videoId": "12rsVkwSsXU", "title": "Washing Machine Heart",
+                              "artist": "Mitski", "album": "Be the Cowboy", "length": "2:09",
+                              "duration": 129, "image": "https://lh3/a=w544-h544", "like": None}
+track = bar.track_of(radio)
+assert track["duration"] == 171 and track["like"] == "LIKE" and track["album"] == ""
+assert bar.track_of({**radio, "likeStatus": None})["like"] is None
+
+# Songs first, then videos; no videoId or repeats are skipped.
+video = {"videoId": "3vjkh-acmTE", "title": "Washing Machine Heart", "artists": mitski,
+         "views": "187M", "resultType": "video"}
+results = bar.merge_results([song, {"title": "No id"}, song], [video, song])
+assert results == [
+    {"videoId": "12rsVkwSsXU", "title": "Washing Machine Heart", "kind": "Song", "detail": "Mitski · 2:09"},
+    {"videoId": "3vjkh-acmTE", "title": "Washing Machine Heart", "kind": "Video", "detail": "Mitski · 187M views"},
+]
+many = [{**song, "videoId": f"s{i:010d}"} for i in range(20)]
+assert len(bar.merge_results(many, None)) == bar.SONG_RESULTS
+assert bar.merge_results(None, None) == []
 
 
-assert bar.text_of({"runs": [{"text": "a"}, {"text": "b"}]}) == "ab"
-assert bar.text_of({"simpleText": "x"}) == "x"
-assert bar.text_of(None) == ""
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
-# Plain and wrapped (song/video switcher) renderers; unknown items are skipped
-# but keep their slot, so "index" still matches Pear's queue position.
-raw = {"items": [
-    {"playlistPanelVideoRenderer": video("A")},
-    {"automixPreviewVideoRenderer": {}},
-    {"playlistPanelVideoWrapperRenderer": {"primaryRenderer": {"playlistPanelVideoRenderer": video("B", selected=True)}}},
-    {"playlistPanelVideoRenderer": video("C")},
-]}
-rows = bar.simplify_queue(raw)
-assert [r["title"] for r in rows] == ["B", "C"]  # starts at the current song
-assert rows[0] == {"index": 2, "title": "B", "artist": "Artist B", "length": "3:00", "current": True}
-assert rows[1]["index"] == 3
-
-# Current song plus QUEUE_LIMIT after it.
-many = {"items": [{"playlistPanelVideoRenderer": video(str(i), selected=(i == 5))} for i in range(40)]}
-rows = bar.simplify_queue(many)
-assert len(rows) == bar.QUEUE_LIMIT + 1 and rows[0]["title"] == "5"
-
-def result(title, subtitle, video_id=None):
-    item = {"flexColumns": [
-        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": title}]}}},
-        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": t} for t in subtitle]}}},
-    ]}
-    if video_id:
-        item["playlistItemData"] = {"videoId": video_id}
-    return {"musicResponsiveListItemRenderer": item}
-
-
-# Shaped like a real response: a top-result card, then a section; albums have
-# no videoId, episodes are skipped, and repeats of a song are dropped.
-search = {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
-    {"musicCardShelfRenderer": {"contents": [result("Crack Baby", ["Song", " • ", "4:53"], "a1")]}},
-    {"itemSectionRenderer": {"contents": [
-        result("Be the Cowboy", ["Album", " • ", "Mitski", " • ", "2018"]),
-        result("I Want You", ["Song", " • ", "Mitski"], "b2"),
-        result("Crack Baby", ["Song", " • ", "Mitski"], "a1"),
-        result("Interview", ["Episode", " • ", "Aug 3, 2018"], "c3"),
-        result("Washing Machine Heart", ["Video", " • ", "Someone", " • ", "14M views"], "d4"),
-    ]}},
-]}}}}]}}}
-found = bar.simplify_search(search)
-assert [r["videoId"] for r in found] == ["a1", "b2", "d4"]
-assert found[0] == {"videoId": "a1", "title": "Crack Baby", "kind": "Song", "detail": "4:53"}
-assert found[1]["detail"] == "Mitski"
-assert found[2] == {"videoId": "d4", "title": "Washing Machine Heart", "kind": "Video", "detail": "Someone · 14M views"}
-assert bar.simplify_search({}) == []
-
-assert bar.simplify_queue(None) == []
-assert bar.simplify_queue({"items": [{"playlistPanelVideoRenderer": video("only")}]})[0]["title"] == "only"
-
-# Error JSON, against a port nothing listens on.
-with socket.socket() as s:
-    s.bind(("127.0.0.1", 0))
-    free_port = s.getsockname()[1]
 
 with tempfile.TemporaryDirectory() as home:
+    port = free_port()
+    env = {**os.environ, "HOME": home, "YTM_BAR_PORT": str(port),
+           "XDG_STATE_HOME": home + "/state", "XDG_RUNTIME_DIR": home}
+
     def cli(*args):
-        env = {**os.environ, "HOME": home, "YTM_BAR_PORT": str(free_port)}
         out = subprocess.run([CLI, *args], capture_output=True, text=True, env=env)
         return out.returncode, json.loads(out.stdout)
 
-    code, result = cli("next")
-    assert code == 1 and result["code"] == "unauthorized"  # no token yet
-
-    token = Path(home) / ".config/ytm-bar/token"
-    token.parent.mkdir(parents=True)
-    token.write_text("abc\n")
+    # Nothing listens yet.
     code, result = cli("next")
     assert code == 1 and result["code"] == "offline"
-
     assert cli("seek", "soon")[1]["error"] == "Usage: ytm-bar seek NUMBER"
     assert cli("search", " ")[1]["error"] == "Usage: ytm-bar search QUERY"
     assert cli("play")[1]["error"] == "Usage: ytm-bar play VIDEO_ID"
     assert cli("dance")[1]["code"] == "failed"
 
-    # save_token writes 0600.
-    bar.TOKEN = Path(home) / "saved/token"
-    bar.CONFIG = bar.TOKEN.parent
-    bar.save_token("xyz")
-    assert bar.read_token() == "xyz"
-    assert oct(bar.TOKEN.stat().st_mode & 0o777) == "0o600"
+    # The service, with nothing playing (mpv only starts on first play).
+    daemon = subprocess.Popen([CLI, "daemon"], env=env)
+    try:
+        for _ in range(50):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.1)
+
+        def get(headers):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/song", headers=headers)
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        assert get({bar.HEADER: "1"}) == 204
+        assert get({}) == 403  # a web page can't send the header
+        assert get({bar.HEADER: "1", "Host": "evil.example:80"}) == 403  # DNS rebinding
+
+        assert cli("song") == (0, {"ok": True, "song": None})
+        code, state = cli("state")
+        assert code == 0 and state["queue"] == [] and state["loggedIn"] is False
+        assert cli("toggle") == (0, {"ok": True})  # nothing loaded: a no-op
+        assert cli("repeat") == (0, {"ok": True}) and cli("state")[1]["repeat"] == "ALL"
+        assert cli("volume", "250") == (0, {"ok": True}) and cli("state")[1]["volume"] == 100
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100}
+        assert not Path(home, "ytm-bar-mpv.sock").exists()
+    finally:
+        daemon.terminate()
+        daemon.wait(5)
 
 print("ok")

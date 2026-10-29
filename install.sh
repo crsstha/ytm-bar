@@ -1,10 +1,9 @@
 #!/bin/bash
-# Install ytm-bar: the YouTube Music (Pear Desktop) widget for the Omarchy bar.
+# Install ytm-bar: the YouTube Music widget for the Omarchy bar.
 #
-#   ./install.sh                install, put the widget after the clock, add the
-#                               keybinding + hidden-window rule
-#   ./install.sh --no-bindings  skip the keybinding and window rule
-#   ./install.sh --autostart    also start YouTube Music (hidden) at login
+#   ./install.sh                install, put the widget after the clock, start the
+#                               player service and add the keybinding
+#   ./install.sh --no-bindings  skip the keybinding
 #
 # Safe to run again: links are refreshed and config blocks (between "ytm-bar"
 # marker comments, which uninstall.sh removes) are replaced with the latest.
@@ -14,15 +13,14 @@ NAME=ytm-bar
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$REPO/manifest.json" | head -1)"
 BIN="$HOME/.local/bin"
-PORT="${YTM_BAR_PORT:-26538}"
+UNITS="$HOME/.config/systemd/user"
+PACKAGES=(mpv yt-dlp python-ytmusicapi mpv-mpris)
 
 bindings=1
-autostart=0
 for arg in "$@"; do
   case "$arg" in
     --no-bindings) bindings=0 ;;
-    --autostart) autostart=1 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -59,24 +57,35 @@ add_block() {  # add_block SNIPPET TARGET — append between markers, replacing 
   fi
 }
 
+remove_block() {
+  local target=$1
+  [[ -f $target ]] && grep -q ">>> $NAME >>>" "$target" || return 0
+  sed -i "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
+  echo "    removed the old ytm-bar block from $target"
+}
+
 chmod +x "$REPO/bin/"*
+
+echo "--> Packages"
+missing=()
+for pkg in "${PACKAGES[@]}"; do
+  pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+done
+if (( ${#missing[@]} )); then
+  echo "    ! missing: ${missing[*]} — run: omarchy pkg add ${missing[*]}"
+else
+  echo "    mpv, yt-dlp, ytmusicapi and mpv-mpris are installed"
+fi
 
 echo "--> Script"
 link "$REPO/bin/ytm-bar" "$BIN/ytm-bar"
 
-echo "--> YouTube Music (Pear Desktop)"
-if command -v youtube-music >/dev/null 2>&1; then
-  echo "    installed"
-else
-  echo "    ! not installed — run: omarchy pkg aur add pear-desktop-bin"
-fi
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$PORT/api/v1/song" || true)"
-case "$code" in
-  401|403) echo "    API Server is on (port $PORT)" ;;
-  200|204) echo "    API Server is on (port $PORT) — but without auth; consider 'Authorize at first request'" ;;
-  *) echo "    ! API Server not reachable on port $PORT — open YouTube Music, then"
-     echo "      Plugins → API Server → enable, authorization: \"Authorize at first request\"" ;;
-esac
+echo "--> Player service"
+link "$REPO/systemd/ytm-bar.service" "$UNITS/ytm-bar.service"
+systemctl --user daemon-reload
+systemctl --user enable ytm-bar.service >/dev/null 2>&1
+systemctl --user restart ytm-bar.service
+echo "    ytm-bar.service enabled and (re)started"
 
 echo "--> Omarchy bar plugin ($PLUGIN_ID)"
 plugin_dir="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
@@ -98,22 +107,14 @@ else
   echo "    already in the bar"
 fi
 (( bindings )) && add_block "$REPO/omarchy/bindings.lua" "$HOME/.config/hypr/bindings.lua"
-(( autostart )) && add_block "$REPO/omarchy/autostart.lua" "$HOME/.config/hypr/autostart.lua"
+# The Pear Desktop version started the app at login; the service replaces that.
+remove_block "$HOME/.config/hypr/autostart.lua"
 hyprctl reload >/dev/null 2>&1 || true
 
-echo "--> Keep running in the tray"
-pear_config="$HOME/.config/YouTube Music/config.json"
-if [[ -f $pear_config ]] && jq -e '.options.tray == true' "$pear_config" >/dev/null 2>&1; then
-  echo "    tray is on"
+echo "--> Account"
+if [[ -s $HOME/.config/ytm-bar/browser.json ]]; then
+  echo "    logged in — 'ytm-bar logout' to forget it"
 else
-  echo "    ! turn on YouTube Music's tray (Options → Tray → Enabled) so closing the"
-  echo "      window doesn't quit the app"
-fi
-
-echo "--> Token"
-if [[ -s $HOME/.config/ytm-bar/token ]]; then
-  echo "    connected — 'ytm-bar auth' asks for a new token"
-else
-  echo "    click the widget's \"Connect\" (or run 'ytm-bar auth') and approve it in YouTube Music"
+  echo "    not logged in: search and radio work; run 'ytm-bar login' to like songs"
 fi
 echo "==> Done"

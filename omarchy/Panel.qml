@@ -4,9 +4,8 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Player popup plus the pill label. Now-playing is polled straight from Pear
-// Desktop's API Server (GET /api/v1/song); everything else goes through
-// bin/ytm-bar, which owns the token and the queue parsing.
+// Player popup plus the pill label. Now-playing is polled straight from the
+// ytm-bar service (GET /song); everything else goes through bin/ytm-bar.
 Panel {
   id: root
   moduleName: "crsstha.ytmusic"
@@ -18,20 +17,18 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("../bin/ytm-bar")).replace(/^file:\/\//, ""))
-  readonly property string api: "http://127.0.0.1:26538"
+  readonly property string api: "http://127.0.0.1:26539"
   readonly property int maxTitleLength: 30
   // Card background opacity; Hyprland blurs what shows through (omarchy/bindings.lua).
   readonly property real cardOpacity: 0.75
 
-  property string token: ""
-  // "offline" (app closed), "unauthorized" (no/expired token), "idle" (nothing loaded), "ok".
+  // "offline" (service stopped), "idle" (nothing loaded), "ok".
   property string status: "offline"
   property var song: null
-  property var player: ({ like: "INDIFFERENT", shuffle: false, repeat: "NONE", volume: 0, muted: false, queue: [] })
-  property bool connecting: false
+  property var player: ({ like: "INDIFFERENT", shuffle: false, repeat: "NONE", volume: 0, muted: false, loggedIn: false, queue: [] })
   property string message: ""
 
-  // Sliders: after a seek/volume change, hold the new value until Pear reports
+  // Sliders: after a seek/volume change, hold the new value until the service reports
   // it, so the knob doesn't snap back to the stale value and jump forward again.
   property real pendingSeek: -1
   property real pendingVolume: -1
@@ -39,7 +36,7 @@ Panel {
   property real elapsedBase: 0
   property double elapsedAt: 0
   property double clockMs: 0
-  // Set while Pear lags behind the displayed position (e.g. buffering after a
+  // Set while mpv lags behind the displayed position (e.g. buffering after a
   // seek): the knob waits for it instead of stepping backwards.
   property bool elapsedHeld: false
   readonly property real elapsed: song
@@ -60,7 +57,7 @@ Panel {
   readonly property bool showWave: status === "ok" && song !== null
   readonly property string waveTitle: song ? truncate(song.title) : ""
   readonly property bool dimmed: status !== "ok" || !playing
-  readonly property string tooltip: status === "offline" ? "Start YouTube Music" : (song ? song.title + " — " + song.artist : "")
+  readonly property string tooltip: status === "offline" ? "Start the YouTube Music player" : (song ? song.title + " — " + song.artist : "")
 
   function glyph(code) { return String.fromCodePoint(code) }
   readonly property string iconMusic: glyph(0xF075A)
@@ -85,7 +82,10 @@ Panel {
     root.open()
     Qt.callLater(function() { searchField.forceActiveFocus() })
   }
-  function close() { root.controller.hide() }
+  function close() {
+    root.controller.hide()
+    root.message = ""
+  }
   function toggle() {
     if (root.status === "offline" && !root.opened) { root.startApp(); return }
     root.opened ? root.close() : root.open()
@@ -110,7 +110,6 @@ Panel {
 
   function buildLabel() {
     if (status === "offline") return iconMusic
-    if (status === "unauthorized") return iconMusic + " Connect"
     if (status !== "ok" || !song) return iconMusic
     return (playing ? iconPause : iconPlay) + " " + truncate(song.title)
   }
@@ -140,16 +139,13 @@ Panel {
       } else if (xhr.status === 204) {
         root.song = null
         root.status = "idle"
-      } else if (xhr.status === 401 || xhr.status === 403) {
-        root.song = null
-        root.status = "unauthorized"
       } else {
         root.song = null
         root.status = "offline"
       }
     }
-    xhr.open("GET", root.api + "/api/v1/song")
-    if (root.token) xhr.setRequestHeader("Authorization", "Bearer " + root.token)
+    xhr.open("GET", root.api + "/song")
+    xhr.setRequestHeader("X-Ytm-Bar", "1")
     xhr.send()
   }
   property var pollRequest: null
@@ -157,13 +153,13 @@ Panel {
   function syncElapsed(reported, sameSong) {
     var now = Date.now()
     if (root.pendingSeek >= 0) {
-      // Ignore stale positions until Pear has actually moved to the seek target.
+      // Ignore stale positions until mpv has actually moved to the seek target.
       if (sameSong && Math.abs(reported - root.pendingSeek) > 2.5) return
       root.pendingSeek = -1
     }
     var shown = root.elapsed
-    // Pear reports whole seconds and stalls while buffering; if it's slightly
-    // behind, hold the knob where it is until Pear catches up.
+    // mpv stalls while buffering; if it's slightly behind, hold the knob where
+    // it is until it catches up.
     var behind = shown - reported
     root.elapsedHeld = sameSong && root.playing && behind > 0.25 && behind < 3
     root.elapsedBase = root.elapsedHeld ? shown : reported
@@ -189,8 +185,11 @@ Panel {
 
   // ---- Everything else goes through bin/ytm-bar.
   function action(name, args) {
-    if (root.status === "unauthorized" && name !== "auth") { root.connect(); return }
     if (root.status !== "ok" && root.status !== "idle") return
+    if ((name === "like" || name === "dislike") && !root.player.loggedIn) {
+      root.message = "Log in to like songs: run ytm-bar login in a terminal."
+      return
+    }
     Quickshell.execDetached([root.cli, name].concat(args || []))
     settleTimer.restart()
   }
@@ -225,40 +224,14 @@ Panel {
     if (now) root.clearSearch()
   }
 
-  function connect() {
-    if (authProc.running) return
-    root.connecting = true
-    root.message = "Approve “ytm-bar” in YouTube Music…"
-    authProc.command = [root.cli, "auth"]
-    authProc.running = true
-  }
-
   function parse(text) {
     try { return JSON.parse(text) } catch (e) { return { ok: false, error: "ytm-bar printed no JSON" } }
   }
 
-  // The app lives on the hidden special:music workspace (see omarchy/bindings.lua).
+  // The player runs as a systemd user service (ytm-bar.service).
   function startApp() {
     Quickshell.execDetached([root.cli, "start"])
     root.message = ""
-  }
-
-  function showWindow() {
-    Quickshell.execDetached([root.cli, "window"])
-    root.close()
-  }
-
-  FileView {
-    id: tokenFile
-    path: Quickshell.env("HOME") + "/.config/ytm-bar/token"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      root.token = text().trim()
-      root.poll()
-    }
-    onLoadFailed: root.token = ""
   }
 
   // 1s while the popup is open or music plays, slower otherwise.
@@ -278,7 +251,7 @@ Panel {
     onTriggered: root.refreshPlayer()
   }
 
-  // After an action, give Pear a moment to apply it, then re-read.
+  // After an action, give the service a moment to apply it, then re-read.
   Timer {
     id: settleTimer
     interval: 350
@@ -310,7 +283,7 @@ Panel {
     onTriggered: root.clockMs = Date.now()
   }
 
-  // Never hold a slider value forever (e.g. Pear clamped or ignored the change).
+  // Never hold a slider value forever (e.g. mpv clamped or ignored the change).
   Timer {
     id: pendingTimeout
     interval: 4000
@@ -343,20 +316,6 @@ Panel {
     }
   }
 
-  Process {
-    id: authProc
-    stdout: StdioCollector {
-      id: authOut
-      waitForEnd: true
-    }
-    onExited: {
-      var result = root.parse(authOut.text)
-      root.connecting = false
-      root.message = result.ok ? "" : (result.error || "Couldn't connect")
-      tokenFile.reload()
-    }
-  }
-
   IpcHandler {
     target: root.ipcTarget
 
@@ -385,34 +344,6 @@ Panel {
     foreground: on ? Color.accent : root.bar.foreground
     hoverColor: Color.accent
     fontFamily: root.bar.fontFamily
-  }
-
-  component TextButton: Rectangle {
-    id: textButton
-    property string text: ""
-    signal clicked()
-    width: buttonLabel.implicitWidth + Style.space(16)
-    height: buttonLabel.implicitHeight + Style.space(6)
-    radius: Math.min(4, Style.cornerRadius)
-    color: buttonArea.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
-    border.width: 1
-    border.color: Qt.darker(root.bar.foreground, 1.8)
-
-    Text {
-      id: buttonLabel
-      anchors.centerIn: parent
-      text: textButton.text
-      color: buttonArea.containsMouse ? Style.hoverStateColor(root.bar.foreground, Color.accent) : root.bar.foreground
-      font.family: root.bar.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    MouseArea {
-      id: buttonArea
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: textButton.clicked()
-    }
   }
 
   component QueueRow: Item {
@@ -561,45 +492,15 @@ Panel {
           width: scroller.width
           spacing: Style.space(8)
 
-          // ---- Not connected: approve a token in YouTube Music.
-          Column {
-            visible: root.status === "unauthorized"
-            width: parent.width
-            spacing: Style.space(8)
-
-            Text {
-              width: parent.width
-              wrapMode: Text.Wrap
-              textFormat: Text.PlainText
-              text: "Connect the bar to YouTube Music. You'll be asked to approve “ytm-bar” in the app."
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-            }
-            TextButton {
-              text: root.connecting ? "Waiting for approval…" : "Connect"
-              onClicked: root.connect()
-            }
-          }
-
           // ---- Running but nothing loaded.
-          Column {
+          Text {
             visible: root.status === "idle" && !root.searchActive
-            width: parent.width
-            spacing: Style.space(8)
-
-            Text {
-              textFormat: Text.PlainText
-              text: "Nothing playing in YouTube Music"
-              color: Qt.darker(root.bar.foreground, 1.5)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.body
-              font.italic: true
-            }
-            TextButton {
-              text: "Show YouTube Music"
-              onClicked: root.showWindow()
-            }
+            textFormat: Text.PlainText
+            text: "Nothing playing — search for a song"
+            color: Qt.darker(root.bar.foreground, 1.5)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.body
+            font.italic: true
           }
 
           // ---- Search.
