@@ -44,18 +44,57 @@ assert bar.track_of(song) == {"videoId": "12rsVkwSsXU", "title": "Washing Machin
 track = bar.track_of(radio)
 assert track["duration"] == 171 and track["like"] == "LIKE" and track["album"] == ""
 assert bar.track_of({**radio, "likeStatus": None})["like"] is None
+# Album tracks name their album as a plain string.
+assert bar.track_of({**radio, "album": "Puberty 2"})["album"] == "Puberty 2"
 
-# Songs first, then videos; no videoId or repeats are skipped.
+# Equalizer: flat is no filter; others lower the level by the biggest boost.
+assert bar.eq_filter("flat") == ""
+assert bar.eq_filter("bass") == ("lavfi=[volume=-5dB,equalizer=f=60:t=o:w=1.5:g=5,"
+                                 "equalizer=f=230:t=o:w=1.5:g=4,equalizer=f=910:t=o:w=1.5:g=1]")
+assert bar.eq_filter("night").startswith("lavfi=[volume=-2dB,")
+
+# Login headers: Chromium's name/value lines and the raw "name: value" form.
+chromium = ":authority\nmusic.youtube.com\n:method\nPOST\naccept\n*/*\ncookie\nSID=a; b=c\nx-goog-authuser\n0\n"
+raw = ":authority: music.youtube.com\naccept: */*\ncookie: SID=a; b=c\nx-goog-authuser: 0"
+expected = "accept: */*\ncookie: SID=a; b=c\nx-goog-authuser: 0"
+assert bar.normalize_headers(chromium) == expected
+assert bar.normalize_headers(raw) == expected
+assert bar.normalize_headers("") == ""
+
+# Every kind of item becomes a row; things the player can't use are dropped.
 video = {"videoId": "3vjkh-acmTE", "title": "Washing Machine Heart", "artists": mitski,
          "views": "187M", "resultType": "video"}
-results = bar.merge_results([song, {"title": "No id"}, song], [video, song])
-assert results == [
-    {"videoId": "12rsVkwSsXU", "title": "Washing Machine Heart", "kind": "Song", "detail": "Mitski · 2:09"},
-    {"videoId": "3vjkh-acmTE", "title": "Washing Machine Heart", "kind": "Video", "detail": "Mitski · 187M views"},
-]
+album = {"resultType": "album", "title": "Be the Cowboy", "type": "Album", "year": "2018",
+         "artists": mitski, "browseId": "MPREb_1", "playlistId": "OLAK5uy_1"}
+artist = {"category": "Top result", "resultType": "artist", "subscribers": "68M", "artists": [{"name": "Mitski", "id": "UC1"}]}
+playlist = {"resultType": "playlist", "title": "Sad songs", "author": "Someone", "browseId": "VLPL1"}
+home_playlist = {"title": "Mix", "playlistId": "RDCLAK1"}
+assert bar.entry_of(song) == {"type": "song", "id": "12rsVkwSsXU", "title": "Washing Machine Heart",
+                              "subtitle": "Mitski", "length": "2:09", "image": "https://lh3/a=w120-h120"}
+assert bar.entry_of(video)["type"] == "video" and bar.entry_of(video)["subtitle"] == "Mitski · 187M views"
+assert bar.entry_of({**song, "artists": None})["subtitle"] == "Song"  # artist missing in the results
+assert bar.entry_of(radio)["type"] == "song"  # album/playlist tracks have no resultType
+assert bar.entry_of(album) == {"type": "album", "id": "MPREb_1", "title": "Be the Cowboy",
+                               "subtitle": "Album · Mitski · 2018", "length": "", "image": ""}
+assert bar.entry_of(artist)["type"] == "artist" and bar.entry_of(artist)["id"] == "UC1"
+assert bar.entry_of(artist)["title"] == "Mitski" and bar.entry_of(artist)["subtitle"] == "Artist · 68M subscribers"
+assert bar.entry_of(playlist)["id"] == "PL1" and bar.entry_of(playlist)["subtitle"] == "Playlist · Someone"
+assert bar.entry_of(home_playlist)["type"] == "playlist" and bar.entry_of(home_playlist)["id"] == "RDCLAK1"
+assert bar.entry_of({"resultType": "episode", "videoId": "x" * 11}) is None
+assert bar.entry_of({**song, "isAvailable": False}) is None
+assert bar.entry_of({"title": "Nothing to open"}) is None
+
+# Numbered rows (album/playlist songs) count only the rows kept.
+rows = bar.entries_of([song, {"title": "No id"}, song, radio], numbered=True)
+assert [(r["id"], r["index"]) for r in rows] == [("12rsVkwSsXU", 0), ("nonJBN_w9Z0", 1)]
+
+# "All": the top result, then one section per type, without repeating the top result.
+sections = bar.search_sections([artist, song, album, video, {**artist, "category": None}, playlist])
+assert [s["title"] for s in sections] == ["Top result", "Songs", "Videos", "Albums", "Playlists"]
 many = [{**song, "videoId": f"s{i:010d}"} for i in range(20)]
-assert len(bar.merge_results(many, None)) == bar.SONG_RESULTS
-assert bar.merge_results(None, None) == []
+assert len(bar.search_sections(many)[0]["items"]) == bar.FILTERS["songs"][2]
+assert len(bar.search_sections(many, "songs")[0]["items"]) == bar.FILTERS["songs"][3]
+assert bar.search_sections([], "albums") == [] and bar.search_sections(None) == []
 
 
 def free_port():
@@ -77,7 +116,10 @@ with tempfile.TemporaryDirectory() as home:
     code, result = cli("next")
     assert code == 1 and result["code"] == "offline"
     assert cli("seek", "soon")[1]["error"] == "Usage: ytm-bar seek NUMBER"
-    assert cli("search", " ")[1]["error"] == "Usage: ytm-bar search QUERY"
+    assert cli("search", " ")[1]["error"] == bar.USAGE["search"]
+    assert cli("search", "x", "--filter", "podcasts")[1]["error"] == bar.USAGE["search"]
+    assert cli("open", "song", "x")[1]["error"] == bar.USAGE["open"]
+    assert cli("playall", "album")[1]["error"] == bar.USAGE["playall"]
     assert cli("play")[1]["error"] == "Usage: ytm-bar play VIDEO_ID"
     assert cli("dance")[1]["code"] == "failed"
 
@@ -107,9 +149,34 @@ with tempfile.TemporaryDirectory() as home:
         code, state = cli("state")
         assert code == 0 and state["queue"] == [] and state["loggedIn"] is False
         assert cli("toggle") == (0, {"ok": True})  # nothing loaded: a no-op
+        assert cli("account") == (0, {"ok": True, "loggedIn": False, "name": "", "photo": ""})
+        assert cli("library")[1]["code"] == "unauthorized"
         assert cli("repeat") == (0, {"ok": True}) and cli("state")[1]["repeat"] == "ALL"
         assert cli("volume", "250") == (0, {"ok": True}) and cli("state")[1]["volume"] == 100
-        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100}
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False}
+
+        # Boost raises the limit to 150; turning it off brings the volume back to 100.
+        assert cli("boost") == (0, {"ok": True})
+        assert cli("volume", "140") == (0, {"ok": True}) and cli("state")[1]["volume"] == 140
+        assert cli("state")[1]["maxVolume"] == 150
+        cli("boost")
+        assert cli("state")[1]["volume"] == 100 and cli("state")[1]["boost"] is False
+
+        assert cli("eq", "Bass") == (0, {"ok": True}) and cli("state")[1]["eq"] == "bass"
+        assert cli("eq", "disco")[1]["error"] == bar.USAGE["eq"]
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text())["eq"] == "bass"
+
+        assert cli("sleep", "30") == (0, {"ok": True})
+        assert cli("state")[1]["sleep"] == {"mode": "min", "left": 1800, "minutes": 30}
+        cli("sleep", "end")
+        assert cli("state")[1]["sleep"] == {"mode": "end"}
+        cli("sleep", "off")
+        assert cli("state")[1]["sleep"] is None
+        assert cli("sleep", "soon")[1]["error"] == bar.USAGE["sleep"]
+
+        assert cli("mute") == (0, {"ok": True}) and cli("state")[1]["muted"] is True
+        assert cli("remove", "3")[1]["error"] == "That song isn't in the queue any more"
+        assert cli("move", "3")[1]["error"] == bar.USAGE["move"]
         assert not Path(home, "ytm-bar-mpv.sock").exists()
     finally:
         daemon.terminate()
