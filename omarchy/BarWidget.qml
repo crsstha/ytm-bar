@@ -71,13 +71,26 @@ BarWidget {
     text: panelLoader.item ? panelLoader.item.label : ""
     // With a song loaded, draw the wave + title (below) in place of the label.
     labelVisible: !root.showWave
-    fixedWidth: root.showWave ? waveRow.implicitWidth + scaledHorizontalMargin * 2 : -1
+    fixedWidth: root.showWave ? waveRow.implicitWidth + 18 + scaledHorizontalMargin * 2 : -1
+
+    // The design's pill: a soft glass capsule around the wave and title.
+    Rectangle {
+      visible: root.showWave
+      anchors.centerIn: waveRow
+      anchors.horizontalCenterOffset: 1
+      width: waveRow.implicitWidth + 18
+      height: Math.min(button.height - 4, waveTitle.implicitHeight + 8)
+      radius: height / 2
+      color: Qt.rgba(1, 1, 1, 0.07)
+      border.width: 1
+      border.color: Qt.rgba(1, 1, 1, 0.08)
+    }
 
     Row {
       id: waveRow
       visible: root.showWave
       anchors.centerIn: parent
-      spacing: Style.spaceReal(6)
+      spacing: Style.spaceReal(8)
 
       Item {
         id: wave
@@ -105,7 +118,8 @@ BarWidget {
             height: wave.minHeight + (wave.maxHeight - wave.minHeight) * level
             anchors.verticalCenter: parent.verticalCenter
             radius: width / 2
-            color: button.foreground
+            // Amber while playing, like the design; the plain bar colour when paused.
+            color: root.playing && panelLoader.item ? panelLoader.item.accent : button.foreground
 
             Behavior on height {
               enabled: !root.playing

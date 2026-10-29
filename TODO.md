@@ -19,5 +19,4 @@ The Pear Desktop backend was replaced by ytmusicapi + mpv + yt-dlp (branch
 - [ ] Premium/age-restricted playback: pass browser cookies to yt-dlp.
 - [ ] Add played songs to the YouTube Music history when logged in
       (`add_history_item`), so recommendations stay personal.
-- [ ] A "start" entry when idle: liked songs or the home mix (needs login).
 - [ ] Keep the radio coming with repeat on (now it only extends with repeat off).

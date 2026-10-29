@@ -1,11 +1,16 @@
 import QtQuick
+import QtQuick.Effects
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Player popup plus the pill label. Now-playing is polled straight from the
-// ytm-bar service (GET /song); everything else goes through bin/ytm-bar.
+// Player popup plus the pill label, styled after the "Mini Player" design:
+// dark glass with a warm glow, a segmented tab bar (Now, Search, Library, Home)
+// and Settings (the YouTube Music login). Albums, artists and playlists open as
+// a page on top of the tab. Everything talks to the ytm-bar service
+// (bin/ytm-bar daemon) over HTTP; now-playing is polled from GET /song.
 Panel {
   id: root
   moduleName: "crsstha.ytmusic"
@@ -19,14 +24,64 @@ Panel {
   readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("../bin/ytm-bar")).replace(/^file:\/\//, ""))
   readonly property string api: "http://127.0.0.1:26539"
   readonly property int maxTitleLength: 30
-  // Card background opacity; Hyprland blurs what shows through (omarchy/bindings.lua).
-  readonly property real cardOpacity: 0.75
+
+  // ---- The design's look. The card is see-through; Hyprland blurs what shows
+  // through (omarchy/bindings.lua).
+  readonly property color accent: "#f3c98b"
+  readonly property color ink: "#f2f2f0"
+  readonly property color cardTint: Qt.rgba(18 / 255, 20 / 255, 24 / 255, 0.62)
+  readonly property color glow: Qt.rgba(233 / 255, 170 / 255, 90 / 255, 0.22)
+  readonly property int cardRadius: 22
+  readonly property int queueRows: 5
+  readonly property string sansFont: geist.status === FontLoader.Ready ? geist.name : root.bar.fontFamily
+  readonly property string monoFont: geistMono.status === FontLoader.Ready ? geistMono.name : root.bar.fontFamily
+  function white(alpha) { return Qt.rgba(1, 1, 1, alpha) }
+
+  FontLoader { id: geist; source: Qt.resolvedUrl("fonts/Geist.ttf") }
+  FontLoader { id: geistMono; source: Qt.resolvedUrl("fonts/GeistMono.ttf") }
 
   // "offline" (service stopped), "idle" (nothing loaded), "ok".
   property string status: "offline"
   property var song: null
-  property var player: ({ like: "INDIFFERENT", shuffle: false, repeat: "NONE", volume: 0, muted: false, loggedIn: false, queue: [] })
+  property var player: ({ like: "INDIFFERENT", shuffle: false, repeat: "NONE", volume: 0, maxVolume: 100, boost: false,
+                          eq: "flat", sleep: null, muted: false, loggedIn: false, queue: [], queueCount: 0 })
+  // When `player` last arrived, so the sleep countdown can tick between updates.
+  property double playerAt: 0
+  readonly property real sleepLeft: player.sleep && player.sleep.mode === "min"
+    ? Math.max(0, player.sleep.left - (playing ? (clockMs - playerAt) / 1000 : 0)) : 0
+  readonly property string sleepLabel: !player.sleep ? "" : (player.sleep.mode === "end" ? "End of song" : clock(sleepLeft))
+
+  // Dragging a queue row: its playlist index, and where it would land (-1: none).
+  property int dragFrom: -1
+  property int dragOver: -1
   property string message: ""
+
+  // "now", "search", "library", "home" or "settings".
+  property string tab: "now"
+  // Open album/artist/playlist pages, newest last; Back pops one.
+  property var pages: []
+  readonly property var page: pages.length > 0 ? pages[pages.length - 1] : null
+
+  property string searchQuery: ""
+  property string searchFilter: "all"
+  property string searchedKey: ""
+  property var searchSections: []
+  property string searchError: ""
+  property int searchSeq: 0
+  readonly property bool searchActive: searchQuery.trim() !== ""
+  readonly property bool searching: searchActive && searchedKey !== searchKey()
+
+  property var homeSections: []
+  property string homeError: ""
+  property bool homeLoading: false
+  property var librarySections: []
+  property string libraryError: ""
+  property bool libraryLoading: false
+  property bool libraryLoaded: false
+
+  property var account: ({ loggedIn: false, name: "", handle: "", photo: "" })
+  property bool loginBusy: false
+  property string loginError: ""
 
   // Sliders: after a seek/volume change, hold the new value until the service reports
   // it, so the knob doesn't snap back to the stale value and jump forward again.
@@ -44,13 +99,6 @@ Panel {
     : 0
   readonly property real volume: pendingVolume >= 0 ? pendingVolume : player.volume
 
-  property string searchQuery: ""
-  property string searchedQuery: ""
-  property var searchResults: []
-  property string searchError: ""
-  readonly property bool searchActive: searchQuery.trim() !== ""
-  readonly property bool searching: searchActive && searchedQuery !== searchQuery.trim()
-
   readonly property bool playing: status === "ok" && song !== null && !song.isPaused
   readonly property string label: buildLabel()
   // The pill draws a wave instead of the play/pause icon while a song is loaded.
@@ -59,28 +107,83 @@ Panel {
   readonly property bool dimmed: status !== "ok" || !playing
   readonly property string tooltip: status === "offline" ? "Start the YouTube Music player" : (song ? song.title + " — " + song.artist : "")
 
-  function glyph(code) { return String.fromCodePoint(code) }
-  readonly property string iconMusic: glyph(0xF075A)
-  readonly property string iconPlay: glyph(0xF040A)
-  readonly property string iconPause: glyph(0xF03E4)
-  readonly property string iconPrevious: glyph(0xF04AE)
-  readonly property string iconNext: glyph(0xF04AD)
-  readonly property string iconLike: glyph(0xF0513)
-  readonly property string iconLikeOff: glyph(0xF0514)
-  readonly property string iconDislike: glyph(0xF0511)
-  readonly property string iconDislikeOff: glyph(0xF0512)
-  readonly property string iconShuffle: glyph(0xF049D)
-  readonly property string iconRepeat: glyph(0xF0456)
-  readonly property string iconRepeatOne: glyph(0xF0458)
-  readonly property string iconVolume: glyph(0xF057E)
-  readonly property string iconMuted: glyph(0xF075F)
-  readonly property string iconSearch: glyph(0xF0349)
-  readonly property string iconPlayNext: glyph(0xF0415)
+  // The pill's label still uses the bar's icon font.
+  readonly property string iconMusic: String.fromCodePoint(0xF075A)
+  readonly property string iconPlayGlyph: String.fromCodePoint(0xF040A)
+  readonly property string iconPauseGlyph: String.fromCodePoint(0xF03E4)
 
-  function open() { root.controller.show(); root.refreshPlayer() }
+  // The design's icons: SVG paths on a 24×24 grid. "Fill" icons are solid.
+  readonly property var icons: ({
+    search: "M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-3.5-3.5",
+    settings: "M4 7h10M18 7h2M4 17h4M12 17h8M14 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M8 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
+    dislike: "M17 14V3M10 14l1 6a2 2 0 0 0 2 1l4-7h3V3H7a3 3 0 0 0-3 2.5L3 11a2 2 0 0 0 2 3h5z",
+    like: "M7 10v11M14 10l-1-6a2 2 0 0 0-2-1l-4 7H4v11h13a3 3 0 0 0 3-2.5l1-5.5a2 2 0 0 0-2-3h-5z",
+    shuffle: "M3 6h3l11 12h4M3 18h3l3-3.3M14 9.3L17 6h4M18 3l3 3-3 3M18 15l3 3-3 3",
+    repeat: "M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4",
+    repeatOne: "M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4M11 10.5l1.2-1V14.5",
+    previousFill: "M6 5h2v14H6zM20 5v14L9 12z",
+    nextFill: "M16 5h2v14h-2zM4 5v14l11-7z",
+    playFill: "M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z",
+    pauseFill: "M7.2 5h1.6a1.2 1.2 0 0 1 1.2 1.2v11.6a1.2 1.2 0 0 1-1.2 1.2H7.2A1.2 1.2 0 0 1 6 17.8V6.2A1.2 1.2 0 0 1 7.2 5zM15.2 5h1.6a1.2 1.2 0 0 1 1.2 1.2v11.6a1.2 1.2 0 0 1-1.2 1.2h-1.6a1.2 1.2 0 0 1-1.2-1.2V6.2A1.2 1.2 0 0 1 15.2 5z",
+    volume: "M11 5L6 9H3v6h3l5 4zM15.5 9a4 4 0 0 1 0 6",
+    muted: "M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5",
+    chevron: "M9 6l6 6-6 6",
+    back: "M15 6l-6 6 6 6",
+    playNext: "M3 6h12M3 12h12M3 18h8M18 14v8M14 18h8",
+    account: "M4 21a8 8 0 0 1 16 0M8 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0",
+    moon: "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z",
+    up: "M12 19V5M6 11l6-6 6 6",
+    close: "M6 6l12 12M18 6L6 18",
+    logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"
+  })
+
+  readonly property var sleepOptions: [
+    { label: "Off", value: "off" },
+    { label: "15 min", value: "15" },
+    { label: "30 min", value: "30" },
+    { label: "1 hr", value: "60" },
+    { label: "End of song", value: "end" }
+  ]
+  // The design's equalizer presets: gains (dB) for five bands, drawn as bars.
+  readonly property var eqPresets: [
+    { value: "flat", label: "Flat", gains: [0, 0, 0, 0, 0] },
+    { value: "bass", label: "Bass", gains: [5, 4, 1, 0, 0] },
+    { value: "vocal", label: "Vocal", gains: [-1, 0, 4, 3, 0] },
+    { value: "treble", label: "Treble", gains: [0, 0, 1, 4, 5] },
+    { value: "loudness", label: "Loudness", gains: [5, 2, 0, 2, 5] },
+    { value: "night", label: "Night", gains: [-1, 0, 2, 1, -1] }
+  ]
+
+  function sleepSelected(value) {
+    var sleep = root.player.sleep
+    if (!sleep) return value === "off"
+    if (sleep.mode === "end") return value === "end"
+    return String(sleep.minutes) === value
+  }
+
+  readonly property var tabs: [
+    { value: "now", label: "Now" },
+    { value: "search", label: "Search" },
+    { value: "library", label: "Library" },
+    { value: "home", label: "Home" }
+  ]
+  readonly property var filters: [
+    { value: "all", label: "All" },
+    { value: "songs", label: "Songs" },
+    { value: "albums", label: "Albums" },
+    { value: "artists", label: "Artists" },
+    { value: "playlists", label: "Playlists" },
+    { value: "videos", label: "Videos" }
+  ]
+
+  function open() {
+    if (root.tab === "now" && !root.song && root.pages.length === 0) root.setTab("search")
+    root.controller.show()
+    root.refreshPlayer()
+  }
   function openFromHotkey() {
     root.open()
-    Qt.callLater(function() { searchField.forceActiveFocus() })
+    root.setTab("search")
   }
   function close() {
     root.controller.hide()
@@ -109,12 +212,37 @@ Panel {
   }
 
   function buildLabel() {
-    if (status === "offline") return iconMusic
     if (status !== "ok" || !song) return iconMusic
-    return (playing ? iconPause : iconPlay) + " " + truncate(song.title)
+    return (playing ? iconPauseGlyph : iconPlayGlyph) + " " + truncate(song.title)
   }
 
-  // ---- Live now-playing: poll the API directly (cheap, localhost).
+  // A stable hue per title, for the placeholder art gradient.
+  function hueOf(text) {
+    var h = 0
+    for (var i = 0; i < (text || "").length; i++) h = (h * 31 + text.charCodeAt(i)) % 360
+    return h / 360
+  }
+
+  // ---- The service. Every command answers one JSON object with "ok".
+  function call(command, args, done) {
+    var xhr = new XMLHttpRequest()
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState !== XMLHttpRequest.DONE) return
+      var result
+      try {
+        result = JSON.parse(xhr.responseText)
+      } catch (e) {
+        result = { ok: false, error: xhr.status === 0 ? "The player service isn't running" : "The player service sent a bad reply" }
+      }
+      if (done) done(result)
+    }
+    xhr.open("POST", root.api + "/" + command)
+    xhr.setRequestHeader("X-Ytm-Bar", "1")
+    xhr.setRequestHeader("Content-Type", "application/json")
+    xhr.send(JSON.stringify({ args: args || [] }))
+  }
+
+  // ---- Live now-playing: poll the service directly (cheap, localhost).
   function poll() {
     if (pollRequest) {
       pollRequest.abort()
@@ -183,55 +311,171 @@ Panel {
     root.action("volume", [String(Math.round(percent))])
   }
 
-  // ---- Everything else goes through bin/ytm-bar.
   function action(name, args) {
     if (root.status !== "ok" && root.status !== "idle") return
     if ((name === "like" || name === "dislike") && !root.player.loggedIn) {
-      root.message = "Log in to like songs: run ytm-bar login in a terminal."
+      root.message = "Log in (Settings) to like songs."
       return
     }
-    Quickshell.execDetached([root.cli, name].concat(args || []))
-    settleTimer.restart()
+    root.call(name, args, function(result) {
+      root.message = result.ok ? "" : (result.error || "That didn't work")
+      settleTimer.restart()
+    })
   }
 
   function refreshPlayer() {
     if (root.status !== "ok" && root.status !== "idle") return
-    if (stateProc.running) return
-    stateProc.command = [root.cli, "state"]
-    stateProc.running = true
+    if (stateBusy) return
+    stateBusy = true
+    root.call("state", [], function(result) {
+      root.stateBusy = false
+      if (!result.ok) return
+      if (root.pendingVolume >= 0 && Math.abs(result.volume - root.pendingVolume) <= 1) root.pendingVolume = -1
+      root.player = result
+      root.playerAt = Date.now()
+    })
   }
-
-  // ---- Search: debounced while typing, immediate on Enter.
-  function runSearch() {
-    var query = root.searchQuery.trim()
-    if (query === "" || searchProc.running || query === root.searchedQuery) return
-    searchProc.query = query
-    searchProc.command = [root.cli, "search", query]
-    searchProc.running = true
-  }
-
-  function clearSearch() {
-    root.searchQuery = ""
-    root.searchedQuery = ""
-    root.searchResults = []
-    root.searchError = ""
-    searchField.text = ""
-  }
-
-  // Clicking a result plays it now; "+" queues it to play next.
-  function playResult(videoId, now) {
-    root.action(now ? "play" : "add", [videoId])
-    if (now) root.clearSearch()
-  }
-
-  function parse(text) {
-    try { return JSON.parse(text) } catch (e) { return { ok: false, error: "ytm-bar printed no JSON" } }
-  }
+  property bool stateBusy: false
 
   // The player runs as a systemd user service (ytm-bar.service).
   function startApp() {
     Quickshell.execDetached([root.cli, "start"])
     root.message = ""
+  }
+
+  // ---- Tabs and pages.
+  function setTab(name) {
+    root.tab = name
+    root.pages = []
+    scroller.contentY = 0
+    if (name === "home" && root.homeSections.length === 0) root.loadHome()
+    if (name === "library" && !root.libraryLoaded) root.loadLibrary()
+    if (name === "settings") {
+      root.loadAccount()
+      root.refreshPlayer()
+    }
+    if (name === "search") Qt.callLater(function() { searchField.forceActiveFocus() })
+  }
+
+  function openPage(entry) {
+    var stack = root.pages.slice()
+    stack.push({ type: entry.type, id: entry.id, title: entry.title, subtitle: entry.subtitle,
+                 image: entry.image, sections: [], loading: true, error: "" })
+    root.pages = stack
+    scroller.contentY = 0
+    root.call("open", [entry.type, entry.id], function(result) {
+      var at = root.pages.findIndex(function(p) { return p.type === entry.type && p.id === entry.id })
+      if (at < 0) return
+      var updated = root.pages.slice()
+      updated[at] = result.ok ? Object.assign(result, { loading: false, error: "" })
+                              : Object.assign({}, updated[at], { loading: false, error: result.error || "Couldn't open it" })
+      root.pages = updated
+    })
+  }
+
+  function back() {
+    root.pages = root.pages.slice(0, -1)
+    scroller.contentY = 0
+  }
+
+  // Songs play (an album or playlist from that song on, like YouTube Music);
+  // albums, artists and playlists open as a page.
+  function activate(entry, context) {
+    if (entry.type === "queue") {
+      if (!entry.current) root.action("jump", [String(entry.index)])
+    } else if (entry.type === "song" || entry.type === "video") {
+      if (context && context.type !== "artist" && entry.index !== undefined)
+        root.action("playall", [context.type, context.id, String(entry.index)])
+      else
+        root.action("play", [entry.id])
+    } else {
+      root.openPage(entry)
+    }
+  }
+
+  // ---- Search: debounced while typing, immediate on Enter or a filter change.
+  function searchKey() { return root.searchFilter + "\n" + root.searchQuery.trim() }
+
+  function runSearch() {
+    if (!root.searchActive || root.searchedKey === root.searchKey()) return
+    var key = root.searchKey()
+    var seq = ++root.searchSeq
+    root.call("search", [root.searchQuery.trim(), root.searchFilter], function(result) {
+      if (seq !== root.searchSeq) return  // a newer search is running
+      root.searchedKey = key
+      root.searchSections = result.ok ? result.sections : []
+      root.searchError = result.ok ? "" : (result.error || "Search failed")
+    })
+  }
+
+  function setFilter(name) {
+    root.searchFilter = name
+    searchDebounce.stop()
+    root.runSearch()
+  }
+
+  function clearSearch() {
+    root.searchQuery = ""
+    root.searchedKey = ""
+    root.searchSections = []
+    root.searchError = ""
+    root.searchSeq++
+    searchField.text = ""
+  }
+
+  function loadHome() {
+    root.homeLoading = true
+    root.call("home", [], function(result) {
+      root.homeLoading = false
+      root.homeSections = result.ok ? result.sections : []
+      root.homeError = result.ok ? "" : (result.error || "Couldn't load your home page")
+    })
+  }
+
+  function loadLibrary() {
+    if (!root.player.loggedIn) return
+    root.libraryLoading = true
+    root.call("library", [], function(result) {
+      root.libraryLoading = false
+      root.libraryLoaded = result.ok
+      root.librarySections = result.ok ? result.sections : []
+      root.libraryError = result.ok ? "" : (result.error || "Couldn't load your library")
+    })
+  }
+
+  // ---- Settings: the YouTube Music login.
+  function loadAccount() {
+    root.call("account", [], function(result) {
+      if (result.ok) root.account = result
+    })
+  }
+
+  // After logging in or out, the library and home page change.
+  function reloadAccount() {
+    root.loadAccount()
+    root.refreshPlayer()
+    root.homeSections = []
+    root.librarySections = []
+    root.libraryLoaded = false
+  }
+
+  function login() {
+    if (root.loginBusy) return
+    root.loginBusy = true
+    root.loginError = ""
+    root.call("login", [headersEdit.text], function(result) {
+      root.loginBusy = false
+      if (result.ok) {
+        headersEdit.text = ""
+        root.reloadAccount()
+      } else {
+        root.loginError = result.error || "Couldn't log in"
+      }
+    })
+  }
+
+  function logout() {
+    root.call("logout", [], function(result) { root.reloadAccount() })
   }
 
   // 1s while the popup is open or music plays, slower otherwise.
@@ -261,20 +505,6 @@ Panel {
     }
   }
 
-  Process {
-    id: stateProc
-    stdout: StdioCollector {
-      id: stateOut
-      waitForEnd: true
-    }
-    onExited: {
-      var result = root.parse(stateOut.text)
-      if (!result.ok) return
-      if (root.pendingVolume >= 0 && Math.abs(result.volume - root.pendingVolume) <= 1) root.pendingVolume = -1
-      root.player = result
-    }
-  }
-
   // Advances the progress knob between polls while the popup shows it.
   Timer {
     interval: 250
@@ -299,23 +529,6 @@ Panel {
     onTriggered: root.runSearch()
   }
 
-  Process {
-    id: searchProc
-    property string query: ""
-    stdout: StdioCollector {
-      id: searchOut
-      waitForEnd: true
-    }
-    onExited: {
-      var result = root.parse(searchOut.text)
-      root.searchedQuery = query
-      root.searchResults = result.ok ? result.results : []
-      root.searchError = result.ok ? "" : (result.error || "Search failed")
-      // The query changed while this one ran.
-      if (root.searchActive && root.searchQuery.trim() !== query) root.runSearch()
-    }
-  }
-
   IpcHandler {
     target: root.ipcTarget
 
@@ -326,126 +539,535 @@ Panel {
     function next(): void { root.action("next") }
     function previous(): void { root.action("previous") }
     function like(): void { root.action("like") }
+    // omarchy-shell crsstha.ytmusic show home|search|library|now|settings
+    function show(tab: string): void {
+      root.open()
+      root.setTab(tab)
+    }
+    // omarchy-shell crsstha.ytmusic search "daft punk"
+    function search(query: string): void {
+      root.open()
+      root.setTab("search")
+      searchField.text = query
+      root.searchQuery = query
+      root.runSearch()
+    }
     function status(): string { return JSON.stringify({ status: root.status, label: root.label, song: root.song }) }
   }
 
-  component SectionHeader: Text {
+  // ---- Building blocks.
+
+  component Label: Text {
     textFormat: Text.PlainText
-    color: Qt.darker(root.bar.foreground, 1.5)
-    font.family: root.bar.fontFamily
-    font.pixelSize: Style.font.bodySmall
-    font.letterSpacing: 1
+    color: root.ink
+    font.family: root.sansFont
+    font.pixelSize: 13
+    // Geist is a variable font: pass the weight as its axis too, or Qt draws
+    // every weight as regular. Set `weight`, not font.weight.
+    property int weight: Font.Normal
+    font.weight: weight
+    font.variableAxes: ({ "wght": weight })
+    elide: Text.ElideRight
   }
 
-  component Control: PanelActionButton {
-    property bool on: false
-    // Rows align items by their top edge; centre them so the bigger play button lines up.
-    anchors.verticalCenter: parent ? parent.verticalCenter : undefined
-    foreground: on ? Color.accent : root.bar.foreground
-    hoverColor: Color.accent
-    fontFamily: root.bar.fontFamily
+  // Times, counts and lengths.
+  component Mono: Label {
+    font.family: root.monoFont
+    font.pixelSize: 11
+    color: root.white(0.5)
   }
 
-  component QueueRow: Item {
-    id: row
-    required property var modelData
+  component SectionHeader: Label {
+    text: ""
+    font.pixelSize: 11
+    weight: Font.DemiBold
+    font.letterSpacing: 0.9
+    font.capitalization: Font.AllUppercase
+    color: root.white(0.45)
+  }
+
+  // Loading, empty and error lines, centred like the design's empty state.
+  component Note: Label {
     width: parent ? parent.width : 0
-    height: rowTitle.implicitHeight + Style.space(8)
+    topPadding: 22
+    bottomPadding: 22
+    horizontalAlignment: Text.AlignHCenter
+    wrapMode: Text.Wrap
+    elide: Text.ElideNone
+    color: root.white(0.45)
+  }
 
-    Rectangle {
-      anchors.fill: parent
-      radius: Math.min(4, Style.cornerRadius)
-      color: rowArea.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
+  // One of the design's SVG icons, stroked (2px on 24) or solid.
+  component Icon: Item {
+    id: icon
+    property string name: ""
+    property color color: root.white(0.55)
+    property real size: 16
+    property real stroke: 2
+    readonly property bool solid: name.endsWith("Fill")
+    width: size
+    height: size
+
+    Shape {
+      width: 24
+      height: 24
+      scale: icon.size / 24
+      transformOrigin: Item.TopLeft
+      preferredRendererType: Shape.CurveRenderer
+
+      ShapePath {
+        strokeColor: icon.solid ? "transparent" : icon.color
+        strokeWidth: icon.solid ? 0 : icon.stroke
+        fillColor: icon.solid ? icon.color : "transparent"
+        capStyle: ShapePath.RoundCap
+        joinStyle: ShapePath.RoundJoin
+        PathSvg { path: root.icons[icon.name] || "" }
+      }
     }
-    Text {
-      id: rowTitle
-      textFormat: Text.PlainText
-      anchors.left: parent.left
-      anchors.leftMargin: Style.space(4)
-      anchors.right: rowLength.left
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-      elide: Text.ElideRight
-      text: row.modelData.title + (row.modelData.artist ? "  ·  " + row.modelData.artist : "")
-      color: row.modelData.current ? Color.accent : root.bar.foreground
-      font.family: root.bar.fontFamily
-      font.pixelSize: Style.font.body
-    }
-    Text {
-      id: rowLength
-      textFormat: Text.PlainText
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(4)
-      anchors.verticalCenter: parent.verticalCenter
-      text: row.modelData.length
-      color: Qt.darker(root.bar.foreground, 1.5)
-      font.family: root.bar.fontFamily
-      font.pixelSize: Style.font.bodySmall
+  }
+
+  // A borderless icon button that lights up on hover.
+  component IconButton: Rectangle {
+    id: iconButton
+    property string icon: ""
+    property real iconSize: 16
+    property color iconColor: root.white(0.55)
+    signal clicked()
+    width: 32
+    height: 32
+    radius: 10
+    color: iconArea.containsMouse ? root.white(0.08) : "transparent"
+
+    Icon {
+      anchors.centerIn: parent
+      name: iconButton.icon
+      size: iconButton.iconSize
+      color: iconButton.iconColor
     }
     MouseArea {
-      id: rowArea
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: row.modelData.current ? Qt.ArrowCursor : Qt.PointingHandCursor
-      onClicked: if (!row.modelData.current) root.action("jump", [String(row.modelData.index)])
-    }
-  }
-
-  component ResultRow: Item {
-    id: result
-    required property var modelData
-    width: parent ? parent.width : 0
-    height: Math.max(resultText.implicitHeight, nextButton.height) + Style.space(8)
-
-    Rectangle {
-      anchors.fill: parent
-      radius: Math.min(4, Style.cornerRadius)
-      color: resultArea.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
-    }
-    MouseArea {
-      id: resultArea
+      id: iconArea
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: root.playResult(result.modelData.videoId, true)
-    }
-    Column {
-      id: resultText
-      anchors.left: parent.left
-      anchors.leftMargin: Style.space(4)
-      anchors.right: nextButton.left
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
-
-      Text {
-        width: parent.width
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        text: result.modelData.title
-        color: root.bar.foreground
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.body
-      }
-      Text {
-        width: parent.width
-        visible: text !== ""
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        text: (result.modelData.kind === "Video" ? "Video · " : "") + result.modelData.detail
-        color: Qt.darker(root.bar.foreground, 1.5)
-        font.family: root.bar.fontFamily
-        font.pixelSize: Style.font.bodySmall
-      }
-    }
-    Control {
-      id: nextButton
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      iconText: root.iconPlayNext
-      tooltipText: "Play next"
-      onClicked: root.playResult(result.modelData.videoId, false)
+      onClicked: iconButton.clicked()
     }
   }
+
+  // Text buttons: white for the main action, glass for the rest.
+  component Pill: Rectangle {
+    id: pill
+    property string text: ""
+    property string icon: ""
+    property bool primary: false
+    signal clicked()
+    width: pillRow.implicitWidth + 26
+    height: 32
+    radius: height / 2
+    color: pill.primary ? (pillArea.containsMouse ? "#ffffff" : root.white(0.92))
+      : (pillArea.containsMouse ? root.white(0.12) : root.white(0.06))
+    border.width: pill.primary ? 0 : 1
+    border.color: root.white(0.08)
+    scale: pillArea.pressed ? 0.96 : 1
+
+    Row {
+      id: pillRow
+      anchors.centerIn: parent
+      spacing: 7
+
+      Icon {
+        visible: pill.icon !== ""
+        anchors.verticalCenter: parent.verticalCenter
+        name: pill.icon
+        size: 14
+        color: pill.primary ? "#111111" : root.ink
+      }
+      Label {
+        anchors.verticalCenter: parent.verticalCenter
+        text: pill.text
+        weight: Font.Medium
+        color: pill.primary ? "#111111" : root.ink
+      }
+    }
+    MouseArea {
+      id: pillArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: pill.clicked()
+    }
+  }
+
+  // Search filters.
+  component Chip: Rectangle {
+    id: chip
+    property string text: ""
+    property bool selected: false
+    signal clicked()
+    width: chipLabel.implicitWidth + 22
+    height: 26
+    radius: 13
+    color: chip.selected ? root.white(0.12) : (chipArea.containsMouse ? root.white(0.06) : "transparent")
+    border.width: 1
+    border.color: chip.selected ? root.white(0.1) : root.white(0.07)
+
+    Label {
+      id: chipLabel
+      anchors.centerIn: parent
+      text: chip.text
+      font.pixelSize: 12
+      weight: Font.Medium
+      color: chip.selected || chipArea.containsMouse ? "#ffffff" : root.white(0.6)
+    }
+    MouseArea {
+      id: chipArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: chip.clicked()
+    }
+  }
+
+  // The design's slim track: 4px rail, a fill, and (for progress) a knob.
+  // Click or drag; `picked` fires on release.
+  component Track: Item {
+    id: track
+    property real value: 0
+    property real maximum: 1
+    property bool knob: false
+    property bool gradientFill: false
+    property color fill: root.white(0.6)
+    // Volume boost: where 100% sits on the track (0 = no marker); beyond it the fill is amber.
+    property real unity: 0
+    property real dragValue: 0
+    readonly property bool dragging: trackArea.pressed
+    readonly property real shown: dragging ? dragValue : value
+    readonly property real fraction: maximum > 0 ? Math.max(0, Math.min(1, shown / maximum)) : 0
+    signal picked(real value)
+    height: 16
+
+    Rectangle {
+      anchors.verticalCenter: parent.verticalCenter
+      width: parent.width
+      height: 4
+      radius: 2
+      color: root.white(0.12)
+    }
+    Rectangle {
+      anchors.verticalCenter: parent.verticalCenter
+      width: parent.width * track.fraction
+      height: 4
+      radius: 2
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0; color: track.gradientFill ? root.white(0.75) : track.fill }
+        GradientStop { position: 1; color: track.gradientFill ? "#ffffff" : track.fill }
+      }
+    }
+    Rectangle {
+      visible: track.unity > 0 && track.fraction > track.unity
+      x: parent.width * track.unity
+      anchors.verticalCenter: parent.verticalCenter
+      width: parent.width * (track.fraction - track.unity)
+      height: 4
+      radius: 2
+      color: root.accent
+    }
+    Rectangle {
+      visible: track.unity > 0
+      x: parent.width * track.unity - 1
+      anchors.verticalCenter: parent.verticalCenter
+      width: 2
+      height: 10
+      radius: 1
+      color: root.white(0.35)
+    }
+    Rectangle {
+      visible: track.knob
+      x: parent.width * track.fraction - width / 2
+      anchors.verticalCenter: parent.verticalCenter
+      width: 20
+      height: 20
+      radius: 10
+      color: root.white(0.12)
+
+      Rectangle {
+        anchors.centerIn: parent
+        width: 12
+        height: 12
+        radius: 6
+        color: "#ffffff"
+      }
+    }
+    MouseArea {
+      id: trackArea
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      function valueAt(x) { return Math.max(0, Math.min(1, x / width)) * track.maximum }
+      onPressed: function(mouse) { track.dragValue = valueAt(mouse.x) }
+      onPositionChanged: function(mouse) { if (pressed) track.dragValue = valueAt(mouse.x) }
+      onReleased: track.picked(track.dragValue)
+    }
+  }
+
+  // Cover art with rounded corners; a gradient in the song's own hue until
+  // (or instead of) the image.
+  component Art: Item {
+    id: art
+    property string source: ""
+    property string seed: ""
+    property real radius: 8
+    readonly property real hue: root.hueOf(seed)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: art.radius
+      gradient: Gradient {
+        GradientStop { position: 0; color: Qt.hsla(art.hue, 0.35, 0.42, 1) }
+        GradientStop { position: 1; color: Qt.hsla(art.hue, 0.3, 0.14, 1) }
+      }
+    }
+    Image {
+      id: artImage
+      anchors.fill: parent
+      visible: false
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      sourceSize.width: art.width * 2
+      sourceSize.height: art.height * 2
+      source: art.source
+    }
+    Item {
+      id: artMask
+      anchors.fill: parent
+      layer.enabled: true
+      visible: false
+      Rectangle { anchors.fill: parent; radius: art.radius }
+    }
+    MultiEffect {
+      anchors.fill: parent
+      visible: artImage.status === Image.Ready
+      source: artImage
+      maskEnabled: true
+      maskSource: artMask
+      maskThresholdMin: 0.5
+      maskSpreadAtMin: 1.0
+    }
+    Rectangle {
+      anchors.fill: parent
+      radius: art.radius
+      color: "transparent"
+      border.width: 1
+      border.color: root.white(0.1)
+    }
+  }
+
+  // One row: a song, video, album, artist, playlist or queue item.
+  component EntryRow: Rectangle {
+    id: row
+    required property var modelData
+    property var context: null
+    property bool large: false
+    readonly property bool playable: modelData.type === "song" || modelData.type === "video"
+    readonly property bool timed: playable || modelData.type === "queue"
+    readonly property bool current: modelData.type === "queue" ? modelData.current === true
+      : playable && root.song !== null && root.song.videoId === modelData.id
+    // Queued songs after the current one can be moved, sent up next or removed.
+    readonly property bool editable: modelData.type === "queue" && !current
+    readonly property bool showActions: editable && hover.hovered && root.dragFrom < 0
+    width: parent ? parent.width : 0
+    height: rowArt.height + 12
+    radius: 12
+    opacity: editable && root.dragFrom === modelData.index ? 0.4 : 1
+    color: modelData.type === "queue" && current ? root.white(0.07)
+      : (hover.hovered && root.dragFrom < 0 ? root.white(0.06) : "transparent")
+
+    HoverHandler { id: hover }
+    MouseArea {
+      anchors.fill: parent
+      preventStealing: true
+      cursorShape: !row.editable ? (row.current ? Qt.ArrowCursor : Qt.PointingHandCursor)
+        : (root.dragFrom >= 0 ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
+      property real pressY: 0
+      property bool dragged: false
+      onPressed: function(mouse) {
+        pressY = mouse.y
+        dragged = false
+      }
+      // Drag a queued song up or down; the amber line shows where it lands.
+      onPositionChanged: function(mouse) {
+        if (!row.editable || !pressed) return
+        var dy = mouse.y - pressY
+        if (!dragged && Math.abs(dy) < 6) return
+        dragged = true
+        var queue = root.player.queue
+        var first = queue.length > 0 ? queue[0].index + 1 : 0
+        var last = queue.length > 0 ? queue[queue.length - 1].index : 0
+        root.dragFrom = row.modelData.index
+        root.dragOver = Math.max(first, Math.min(last, row.modelData.index + Math.round(dy / (row.height + 1))))
+      }
+      onReleased: {
+        if (dragged) {
+          if (root.dragOver >= 0 && root.dragOver !== root.dragFrom)
+            root.action("move", [String(root.dragFrom), String(root.dragOver)])
+          root.dragFrom = -1
+          root.dragOver = -1
+        }
+      }
+      onCanceled: {
+        root.dragFrom = -1
+        root.dragOver = -1
+      }
+      onClicked: if (!dragged) root.activate(row.modelData, row.context)
+    }
+    Rectangle {
+      visible: row.editable && root.dragOver === row.modelData.index && root.dragFrom !== row.modelData.index
+      width: parent.width
+      height: 2
+      radius: 1
+      color: root.accent
+    }
+    Art {
+      id: rowArt
+      anchors.left: parent.left
+      anchors.leftMargin: 6
+      anchors.verticalCenter: parent.verticalCenter
+      width: row.large ? 56 : 40
+      height: width
+      radius: row.modelData.type === "artist" ? width / 2 : (row.large ? 10 : 8)
+      source: row.modelData.image || ""
+      seed: row.modelData.title
+    }
+    Column {
+      anchors.left: rowArt.right
+      anchors.leftMargin: 12
+      anchors.right: trailing.left
+      anchors.rightMargin: 10
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: 1
+
+      Label {
+        width: parent.width
+        text: row.modelData.title
+        font.pixelSize: row.large ? 15 : 13
+        weight: row.large ? Font.DemiBold : Font.Medium
+        color: row.current ? root.accent : root.white(0.92)
+      }
+      Label {
+        width: parent.width
+        visible: text !== ""
+        text: row.modelData.subtitle || ""
+        font.pixelSize: 12
+        color: root.white(0.45)
+      }
+    }
+    // Length (or "play next" while hovered) for songs; a chevron for things that open.
+    Item {
+      id: trailing
+      anchors.right: parent.right
+      anchors.rightMargin: 8
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.max(lengthText.implicitWidth, 28)
+      height: 28
+
+      Mono {
+        id: lengthText
+        anchors.right: parent.right
+        anchors.rightMargin: 4
+        anchors.verticalCenter: parent.verticalCenter
+        visible: row.timed && !nextButton.visible && !row.showActions
+        text: row.modelData.length || ""
+        color: root.white(0.4)
+      }
+      Icon {
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        visible: !row.timed
+        name: "chevron"
+        size: 14
+        stroke: 2.2
+        color: root.white(0.35)
+      }
+      IconButton {
+        id: nextButton
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        width: 28
+        height: 28
+        radius: 8
+        visible: row.playable && hover.hovered
+        icon: "playNext"
+        iconSize: 15
+        iconColor: root.ink
+        onClicked: root.action("add", [row.modelData.id])
+      }
+    }
+    Row {
+      anchors.right: parent.right
+      anchors.rightMargin: 6
+      anchors.verticalCenter: parent.verticalCenter
+      visible: row.showActions
+      spacing: 2
+
+      IconButton {
+        width: 28
+        height: 28
+        radius: 8
+        color: hovered ? root.white(0.14) : root.white(0.06)
+        readonly property bool hovered: upHover.hovered
+        HoverHandler { id: upHover }
+        icon: "up"
+        iconSize: 13
+        iconColor: upHover.hovered ? "#ffffff" : root.white(0.8)
+        onClicked: root.action("playnext", [String(row.modelData.index)])
+      }
+      IconButton {
+        width: 28
+        height: 28
+        radius: 8
+        color: removeHover.hovered ? Qt.rgba(1, 90 / 255, 90 / 255, 0.22) : root.white(0.06)
+        HoverHandler { id: removeHover }
+        icon: "close"
+        iconSize: 13
+        iconColor: removeHover.hovered ? "#ffffff" : root.white(0.8)
+        onClicked: root.action("remove", [String(row.modelData.index)])
+      }
+    }
+  }
+
+  // Titled sections of rows (search results, home, library, a page).
+  component Sections: Column {
+    id: list
+    property var sections: []
+    property var context: null
+    width: parent ? parent.width : 0
+    spacing: 8
+
+    Repeater {
+      model: list.sections
+      delegate: Column {
+        id: section
+        required property var modelData
+        width: list.width
+        spacing: 1
+
+        SectionHeader {
+          leftPadding: 10
+          topPadding: 8
+          bottomPadding: 6
+          text: section.modelData.title
+        }
+        Repeater {
+          model: section.modelData.items
+          delegate: EntryRow {
+            context: list.context
+            large: section.modelData.title === "Top result"
+          }
+        }
+      }
+    }
+  }
+
+  // ---- The card.
 
   KeyboardPanel {
     id: panel
@@ -454,19 +1076,18 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight)
+    // No inner padding: the content sets its own, like the design.
+    padding: 0
+    contentWidth: panel.fittedContentWidth(420)
+    contentHeight: panel.fittedContentHeight(header.height + body.implicitHeight, 720)
 
-    // KeyboardPanel doesn't expose its card's colour, so walk up from our content
-    // to the card (the BorderSurface holding it) and make its background
-    // see-through, keeping the theme colour.
+    // KeyboardPanel doesn't expose its card, so walk up from our content to it
+    // (the BorderSurface holding it) for the design's tint and corners.
     Component.onCompleted: {
       for (var card = keyCatcher.parent; card; card = card.parent) {
         if ("borderSpec" in card && "color" in card) {
-          card.color = Qt.binding(function() {
-            var c = Color.popups.background
-            return Qt.rgba(c.r, c.g, c.b, root.cardOpacity)
-          })
+          card.color = Qt.binding(function() { return root.cardTint })
+          card.radius = root.cardRadius
           return
         }
       }
@@ -475,285 +1096,993 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      onCloseRequested: root.pages.length > 0 ? root.back() : root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+
+      // The warm glow from the top-left corner, kept inside the rounded card.
+      Shape {
+        anchors.fill: parent
+        preferredRendererType: Shape.CurveRenderer
+
+        ShapePath {
+          strokeColor: "transparent"
+          strokeWidth: 0
+          fillGradient: RadialGradient {
+            centerX: 130
+            centerY: 30
+            centerRadius: 190
+            focalX: 130
+            focalY: 30
+            GradientStop { position: 0; color: root.glow }
+            GradientStop { position: 1; color: "transparent" }
+          }
+          PathRectangle {
+            width: keyCatcher.width
+            height: keyCatcher.height
+            radius: root.cardRadius - 1
+          }
+        }
+      }
+
+      // ---- Tabs and Settings.
+      Item {
+        id: header
+        width: parent.width
+        height: 12 + 36
+
+        Rectangle {
+          id: segments
+          x: 12
+          y: 12
+          width: parent.width - 24 - settingsButton.width - 10
+          height: 36
+          radius: 12
+          color: root.white(0.05)
+          border.width: 1
+          border.color: root.white(0.07)
+
+          Row {
+            x: 3
+            y: 3
+            spacing: 2
+
+            Repeater {
+              model: root.tabs
+              delegate: Rectangle {
+                id: tabButton
+                required property var modelData
+                readonly property bool active: root.tab === modelData.value && root.pages.length === 0
+                width: (segments.width - 6 - 2 * 3) / 4
+                height: 30
+                radius: 9
+                color: active ? root.white(0.12) : "transparent"
+
+                Label {
+                  anchors.centerIn: parent
+                  text: tabButton.modelData.label
+                  weight: Font.Medium
+                  color: tabButton.active || tabArea.containsMouse ? "#ffffff" : root.white(0.6)
+                }
+                MouseArea {
+                  id: tabArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setTab(tabButton.modelData.value)
+                }
+              }
+            }
+          }
+        }
+        IconButton {
+          id: settingsButton
+          x: parent.width - 12 - width
+          y: 12
+          width: 36
+          height: 36
+          icon: "settings"
+          color: root.tab === "settings" ? root.white(0.12) : (hovered ? root.white(0.08) : "transparent")
+          iconColor: root.tab === "settings" || hovered ? "#ffffff" : root.white(0.6)
+          readonly property bool hovered: settingsHover.hovered
+          HoverHandler { id: settingsHover }
+          onClicked: root.setTab("settings")
+        }
+      }
 
       Flickable {
         id: scroller
-        anchors.fill: parent
+        anchors.top: header.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         contentWidth: width
-        contentHeight: content.implicitHeight
+        contentHeight: body.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         interactive: contentHeight > height
 
         Column {
-          id: content
+          id: body
           width: scroller.width
-          spacing: Style.space(8)
-
-          // ---- Running but nothing loaded.
-          Text {
-            visible: root.status === "idle" && !root.searchActive
-            textFormat: Text.PlainText
-            text: "Nothing playing — search for a song"
-            color: Qt.darker(root.bar.foreground, 1.5)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.body
-            font.italic: true
-          }
-
-          // ---- Search.
-          TextField {
-            id: searchField
-            visible: root.status === "ok" || root.status === "idle"
-            width: parent.width
-            placeholderText: root.iconSearch + "  Search YouTube Music"
-            foreground: root.bar.foreground
-            accent: Color.accent
-            font.family: root.bar.fontFamily
-            onTextEdited: {
-              root.searchQuery = text
-              if (!root.searchActive) root.clearSearch()
-              else searchDebounce.restart()
-            }
-            onAccepted: {
-              searchDebounce.stop()
-              root.runSearch()
-            }
-            Keys.onEscapePressed: function(event) {
-              if (text !== "") root.clearSearch()
-              else root.close()
-              event.accepted = true
-            }
-          }
 
           Column {
-            visible: root.searchActive && searchField.visible
+            visible: root.status === "offline" || root.message !== ""
             width: parent.width
-            spacing: Style.space(2)
+            leftPadding: 18
+            rightPadding: 18
+            topPadding: 12
 
-            SectionHeader { text: root.searching ? "SEARCHING…" : "RESULTS" }
-            Repeater { model: root.searchResults; delegate: ResultRow {} }
-            SectionHeader {
-              visible: !root.searching && (root.searchError !== "" || root.searchResults.length === 0)
-              text: root.searchError !== "" ? root.searchError : "No songs found"
-              font.italic: true
-              font.letterSpacing: 0
+            Note {
+              visible: root.status === "offline"
+              width: parent.width - 36
+              topPadding: 10
+              bottomPadding: 10
+              text: "The player isn't running. Click the bar widget to start it, or run: systemctl --user start ytm-bar"
+            }
+            Label {
+              visible: root.message !== ""
+              width: parent.width - 36
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              text: root.message
+              font.pixelSize: 12
+              color: root.accent
             }
           }
 
-          Text {
-            visible: root.message !== ""
-            width: parent.width
-            wrapMode: Text.Wrap
-            textFormat: Text.PlainText
-            text: root.message
-            color: Qt.darker(root.bar.foreground, 1.4)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          // ---- Now playing (replaced by results while searching).
+          // ---- An album, artist or playlist page.
           Column {
-            visible: root.status === "ok" && root.song !== null && !root.searchActive
+            visible: root.page !== null
             width: parent.width
-            spacing: Style.space(8)
 
             Row {
-              width: parent.width
-              spacing: Style.space(12)
+              x: 18
+              topPadding: 18
+              width: parent.width - 36
+              spacing: 14
 
-              Rectangle {
-                id: art
-                width: Style.space(72)
-                height: Style.space(72)
-                radius: Math.min(4, Style.cornerRadius)
-                color: Qt.darker(root.bar.foreground, 4)
-                clip: true
+              Art {
+                id: pageArt
+                width: 88
+                height: 88
+                radius: root.page && root.page.type === "artist" ? 44 : 14
+                source: root.page ? root.page.image || "" : ""
+                seed: root.page ? root.page.title : ""
+              }
+              Column {
+                width: parent.width - pageArt.width - parent.spacing
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 4
 
-                Image {
-                  anchors.fill: parent
-                  fillMode: Image.PreserveAspectCrop
-                  asynchronous: true
-                  source: root.song && root.song.imageSrc ? root.song.imageSrc : ""
-                  visible: source !== ""
+                Label {
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  maximumLineCount: 2
+                  text: root.page ? root.page.title : ""
+                  font.pixelSize: 17
+                  weight: Font.DemiBold
+                  font.letterSpacing: -0.17
                 }
-                Text {
-                  anchors.centerIn: parent
-                  visible: !(root.song && root.song.imageSrc)
-                  text: root.iconMusic
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.title
+                Label {
+                  width: parent.width
+                  text: root.page ? root.page.subtitle || "" : ""
+                  font.pixelSize: 12
+                  color: root.white(0.45)
+                }
+                Row {
+                  topPadding: 4
+                  spacing: 8
+
+                  Pill {
+                    text: "Back"
+                    icon: "back"
+                    onClicked: root.back()
+                  }
+                  Pill {
+                    visible: root.page !== null && !root.page.loading && !root.page.error
+                    text: "Play"
+                    icon: "playFill"
+                    primary: true
+                    onClicked: root.action("playall", [root.page.type, root.page.id])
+                  }
                 }
               }
+            }
+            Note {
+              visible: root.page !== null && (root.page.loading || root.page.error !== "")
+              text: root.page ? (root.page.loading ? "Loading…" : root.page.error) : ""
+            }
+            Item { width: 1; height: 10 }
+            Sections {
+              x: 8
+              width: parent.width - 16
+              sections: root.page ? root.page.sections : []
+              context: root.page
+            }
+            Item { width: 1; height: 10 }
+          }
 
+          // ---- Now: the player and the queue.
+          Note {
+            visible: root.page === null && root.tab === "now" && root.status === "idle"
+            text: "Nothing playing — find something in Search or Home."
+          }
+          Column {
+            visible: root.page === null && root.tab === "now" && root.status === "ok" && root.song !== null
+            width: parent.width
+
+            // Cover, title, like / dislike.
+            Item {
+              width: parent.width
+              height: 18 + 76
+
+              Art {
+                id: cover
+                x: 18
+                y: 18
+                width: 76
+                height: 76
+                radius: 14
+                source: root.song && root.song.imageSrc ? root.song.imageSrc : ""
+                seed: root.song ? root.song.title : ""
+              }
               Column {
-                width: parent.width - art.width - parent.spacing
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(2)
+                anchors.left: cover.right
+                anchors.leftMargin: 14
+                anchors.right: rating.left
+                anchors.rightMargin: 6
+                anchors.verticalCenter: cover.verticalCenter
+                spacing: 3
 
-                Text {
+                Label {
                   width: parent.width
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
                   text: root.song ? root.song.title : ""
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.title
-                  font.bold: true
+                  font.pixelSize: 17
+                  weight: Font.DemiBold
+                  font.letterSpacing: -0.17
                 }
-                Text {
+                Label {
                   width: parent.width
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
                   text: root.song ? root.song.artist : ""
-                  color: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.body
+                  color: root.white(0.7)
                 }
-                Text {
+                Label {
                   width: parent.width
                   visible: text !== ""
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
                   text: root.song && root.song.album ? root.song.album : ""
-                  color: Qt.darker(root.bar.foreground, 1.5)
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: 12
+                  color: root.white(0.45)
+                }
+              }
+              Row {
+                id: rating
+                anchors.right: parent.right
+                anchors.rightMargin: 18
+                anchors.verticalCenter: cover.verticalCenter
+                spacing: 2
+
+                IconButton {
+                  icon: "dislike"
+                  iconColor: root.player.like === "DISLIKE" ? root.accent : root.white(0.55)
+                  onClicked: root.action("dislike")
+                }
+                IconButton {
+                  icon: "like"
+                  iconColor: root.player.like === "LIKE" ? root.accent : root.white(0.55)
+                  onClicked: root.action("like")
                 }
               }
             }
 
             // Progress — drag or click to seek.
-            PanelSlider {
-              id: progress
-              bar: root.bar
-              width: parent.width
-              minimum: 0
-              maximum: Math.max(1, root.song ? root.song.songDuration : 1)
-              step: 1
-              integer: true
-              value: root.elapsed
-              onReleased: function(value) { root.seek(value) }
-            }
-            Item {
-              width: parent.width
-              height: elapsedText.implicitHeight
+            Column {
+              x: 18
+              topPadding: 18
+              width: parent.width - 36
+              spacing: 6
 
-              Text {
-                id: elapsedText
-                anchors.left: parent.left
-                textFormat: Text.PlainText
-                text: root.clock(progress.dragging ? progress.liveValue : progress.value)
-                color: Qt.darker(root.bar.foreground, 1.5)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
+              Track {
+                id: progress
+                width: parent.width
+                maximum: Math.max(1, root.song ? root.song.songDuration : 1)
+                value: root.elapsed
+                knob: true
+                gradientFill: true
+                onPicked: function(value) { root.seek(value) }
               }
-              Text {
-                anchors.right: parent.right
-                textFormat: Text.PlainText
-                text: root.clock(root.song ? root.song.songDuration : 0)
-                color: Qt.darker(root.bar.foreground, 1.5)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
+              Item {
+                width: parent.width
+                height: Math.max(elapsedText.implicitHeight, sleepPill.visible ? sleepPill.height : 0)
+
+                Mono {
+                  id: elapsedText
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.clock(progress.shown)
+                }
+                // The sleep timer, when one is set; click to cancel it.
+                Rectangle {
+                  id: sleepPill
+                  visible: root.player.sleep !== null && root.player.sleep !== undefined
+                  anchors.centerIn: parent
+                  width: sleepRow.implicitWidth + 16
+                  height: 18
+                  radius: 9
+                  color: sleepArea.containsMouse ? root.white(0.12) : root.white(0.06)
+                  border.width: 1
+                  border.color: root.white(0.12)
+
+                  Row {
+                    id: sleepRow
+                    anchors.centerIn: parent
+                    spacing: 5
+
+                    Icon {
+                      anchors.verticalCenter: parent.verticalCenter
+                      name: "moon"
+                      size: 10
+                      stroke: 2.4
+                      color: root.accent
+                    }
+                    Mono {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.sleepLabel
+                      font.pixelSize: 10
+                      color: root.accent
+                    }
+                    Mono {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "✕"
+                      font.pixelSize: 10
+                      color: root.white(0.4)
+                    }
+                  }
+                  MouseArea {
+                    id: sleepArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.action("sleep", ["off"])
+                  }
+                }
+                Mono {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "-" + root.clock((root.song ? root.song.songDuration : 0) - progress.shown)
+                }
               }
             }
 
             // Controls.
             Item {
               width: parent.width
-              height: playButton.height
+              height: 10 + 56
 
               Row {
-                anchors.centerIn: parent
-                spacing: Style.space(10)
+                x: 26
+                y: 10
+                readonly property real gaps: (parent.width - 52 - 36 * 2 - 44 * 2 - 56) / 4
+                spacing: gaps
 
-                Control {
-                  iconText: root.player.like === "DISLIKE" ? root.iconDislike : root.iconDislikeOff
-                  on: root.player.like === "DISLIKE"
-                  tooltipText: "Dislike"
-                  onClicked: root.action("dislike")
-                }
-                Control {
-                  iconText: root.iconShuffle
-                  on: root.player.shuffle
-                  tooltipText: "Shuffle"
+                IconButton {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: 36
+                  height: 36
+                  radius: 18
+                  icon: "shuffle"
+                  iconSize: 17
+                  iconColor: root.player.shuffle ? root.accent : root.white(0.55)
                   onClicked: root.action("shuffle")
                 }
-                Control {
-                  iconText: root.iconPrevious
-                  tooltipText: "Previous"
+                IconButton {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: 44
+                  height: 44
+                  radius: 22
+                  icon: "previousFill"
+                  iconSize: 20
+                  iconColor: "#ffffff"
                   onClicked: root.action("previous")
                 }
-                Control {
+                Rectangle {
                   id: playButton
-                  iconText: root.playing ? root.iconPause : root.iconPlay
-                  fontSize: Style.font.icon * 1.4
-                  tooltipText: root.playing ? "Pause" : "Play"
-                  onClicked: root.action("toggle")
+                  width: 56
+                  height: 56
+                  radius: 28
+                  color: "#ffffff"
+                  scale: playArea.pressed ? 0.95 : 1
+
+                  Behavior on scale { NumberAnimation { duration: 90 } }
+
+                  Icon {
+                    anchors.centerIn: parent
+                    name: root.playing ? "pauseFill" : "playFill"
+                    size: 22
+                    color: "#111111"
+                  }
+                  MouseArea {
+                    id: playArea
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.action("toggle")
+                  }
                 }
-                Control {
-                  iconText: root.iconNext
-                  tooltipText: "Next"
+                IconButton {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: 44
+                  height: 44
+                  radius: 22
+                  icon: "nextFill"
+                  iconSize: 20
+                  iconColor: "#ffffff"
                   onClicked: root.action("next")
                 }
-                Control {
-                  iconText: root.player.repeat === "ONE" ? root.iconRepeatOne : root.iconRepeat
-                  on: root.player.repeat !== "NONE"
-                  tooltipText: root.player.repeat === "ONE" ? "Repeat one" : (root.player.repeat === "ALL" ? "Repeat all" : "Repeat off")
+                IconButton {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: 36
+                  height: 36
+                  radius: 18
+                  icon: root.player.repeat === "ONE" ? "repeatOne" : "repeat"
+                  iconSize: 17
+                  iconColor: root.player.repeat !== "NONE" ? root.accent : root.white(0.55)
                   onClicked: root.action("repeat")
-                }
-                Control {
-                  iconText: root.player.like === "LIKE" ? root.iconLike : root.iconLikeOff
-                  on: root.player.like === "LIKE"
-                  tooltipText: "Like"
-                  onClicked: root.action("like")
                 }
               }
             }
 
             // Volume.
-            Row {
+            Item {
               width: parent.width
-              spacing: Style.space(8)
+              height: 12 + 16 + 16
 
-              Text {
-                id: volumeIcon
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.player.muted ? root.iconMuted : root.iconVolume
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.icon
+              IconButton {
+                id: muteButton
+                x: 14
+                y: 12 + (16 - height) / 2
+                width: 28
+                height: 28
+                radius: 8
+                icon: root.player.muted ? "muted" : "volume"
+                iconSize: 15
+                iconColor: root.player.muted ? root.accent : root.white(0.55)
+                onClicked: root.action("mute")
               }
-              PanelSlider {
-                bar: root.bar
-                width: parent.width - volumeIcon.width - parent.spacing
-                anchors.verticalCenter: parent.verticalCenter
-                minimum: 0
-                maximum: 100
-                step: 5
-                integer: true
+              Track {
+                anchors.left: muteButton.right
+                anchors.leftMargin: 6
+                anchors.right: volumeText.left
+                anchors.rightMargin: 12
+                y: 12
+                opacity: root.player.muted ? 0.4 : 1
+                maximum: root.player.maxVolume || 100
+                unity: root.player.boost ? 100 / (root.player.maxVolume || 150) : 0
                 value: root.volume
-                onReleased: function(value) { root.setVolume(value) }
+                onPicked: function(value) { root.setVolume(value) }
+              }
+              Mono {
+                id: volumeText
+                anchors.right: parent.right
+                anchors.rightMargin: 20
+                y: 12 + (16 - height) / 2
+                width: 44
+                horizontalAlignment: Text.AlignRight
+                text: root.player.muted ? "Muted" : Math.round(root.volume) + "%"
+                color: root.volume > 100 && !root.player.muted ? root.accent : root.white(0.5)
               }
             }
 
+            // Up next, in a darker well along the bottom of the card.
             Rectangle {
               width: parent.width
-              height: Style.spacing.hairline
-              color: root.bar.foreground
-              opacity: 0.12
+              height: queueColumn.implicitHeight
+              color: Qt.rgba(0, 0, 0, 0.18)
+              bottomLeftRadius: root.cardRadius - 1
+              bottomRightRadius: root.cardRadius - 1
+
+              Rectangle {
+                width: parent.width
+                height: 1
+                color: root.white(0.07)
+              }
+              Column {
+                id: queueColumn
+                width: parent.width
+                topPadding: 14
+                bottomPadding: 8
+
+                Item {
+                  x: 18
+                  width: parent.width - 36
+                  height: upNext.implicitHeight + 8
+
+                  SectionHeader { id: upNext; text: "Up next" }
+                  Mono {
+                    anchors.right: parent.right
+                    anchors.baseline: upNext.baseline
+                    text: root.player.queueCount + (root.player.queueCount === 1 ? " track" : " tracks")
+                    color: root.white(0.35)
+                  }
+                }
+                Flickable {
+                  x: 8
+                  width: parent.width - 16
+                  height: Math.min(queueList.implicitHeight, root.queueRows * 53)
+                  contentHeight: queueList.implicitHeight
+                  clip: true
+                  boundsBehavior: Flickable.StopAtBounds
+                  interactive: contentHeight > height && root.dragFrom < 0
+
+                  Column {
+                    id: queueList
+                    width: parent.width
+                    spacing: 1
+
+                    Repeater {
+                      model: root.player.queue.map(function(item) {
+                        return { type: "queue", id: String(item.index), index: item.index, title: item.title,
+                                 subtitle: item.artist, length: item.length, image: item.image || "", current: item.current }
+                      })
+                      delegate: EntryRow {}
+                    }
+                  }
+                }
+                Note {
+                  visible: root.player.queue.length === 0
+                  text: "Queue is empty"
+                }
+              }
+            }
+          }
+
+          // ---- Search.
+          Column {
+            visible: root.page === null && root.tab === "search"
+            width: parent.width
+
+            Item {
+              width: parent.width
+              height: 14 + 40
+
+              TextField {
+                id: searchField
+                x: 12
+                y: 14
+                width: parent.width - 24
+                height: 40
+                leftPadding: 36
+                rightPadding: 12
+                placeholderText: "Search YouTube Music"
+                placeholderTextColor: root.white(0.38)
+                color: "#ffffff"
+                foreground: "#ffffff"
+                accent: root.accent
+                font.family: root.sansFont
+                font.pixelSize: 13
+                background: Rectangle {
+                  radius: 12
+                  color: root.white(0.06)
+                  border.width: 1
+                  border.color: searchField.activeFocus ? root.white(0.18) : root.white(0.08)
+                }
+                onTextEdited: {
+                  root.searchQuery = text
+                  if (!root.searchActive) root.clearSearch()
+                  else searchDebounce.restart()
+                }
+                onAccepted: {
+                  searchDebounce.stop()
+                  root.runSearch()
+                }
+                Keys.onEscapePressed: function(event) {
+                  if (text !== "") root.clearSearch()
+                  else root.close()
+                  event.accepted = true
+                }
+
+                Icon {
+                  x: 13
+                  anchors.verticalCenter: parent.verticalCenter
+                  name: "search"
+                  size: 14
+                  stroke: 2.2
+                  color: root.white(0.45)
+                }
+              }
+            }
+            Flow {
+              x: 12
+              topPadding: 10
+              width: parent.width - 24
+              spacing: 6
+
+              Repeater {
+                model: root.filters
+                delegate: Chip {
+                  required property var modelData
+                  text: modelData.label
+                  selected: root.searchFilter === modelData.value
+                  onClicked: root.setFilter(modelData.value)
+                }
+              }
+            }
+            Note {
+              visible: root.searchActive && (root.searching || root.searchError !== "" || root.searchSections.length === 0)
+              text: root.searching ? "Searching…" : (root.searchError !== "" ? root.searchError : "No results for “" + root.searchQuery.trim() + "”")
+            }
+            Item { width: 1; height: 10 }
+            Sections {
+              x: 8
+              width: parent.width - 16
+              visible: root.searchActive
+              sections: root.searchSections
+            }
+            Item { width: 1; height: 10 }
+          }
+
+          // ---- Library.
+          Column {
+            visible: root.page === null && root.tab === "library"
+            width: parent.width
+
+            Note {
+              visible: !root.player.loggedIn
+              bottomPadding: 12
+              text: "Log in to see your playlists, albums and artists."
+            }
+            Item {
+              visible: !root.player.loggedIn
+              width: parent.width
+              height: 32 + 24
+
+              Pill {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Log in"
+                icon: "account"
+                primary: true
+                onClicked: root.setTab("settings")
+              }
+            }
+            Note {
+              visible: root.player.loggedIn && (root.libraryLoading || root.libraryError !== "")
+              text: root.libraryLoading ? "Loading…" : root.libraryError
+            }
+            Item { width: 1; height: 10 }
+            Sections {
+              x: 8
+              width: parent.width - 16
+              visible: root.player.loggedIn
+              sections: root.librarySections
+            }
+            Item { width: 1; height: 10 }
+          }
+
+          // ---- Home.
+          Column {
+            visible: root.page === null && root.tab === "home"
+            width: parent.width
+
+            Note {
+              visible: root.homeLoading || root.homeError !== ""
+              text: root.homeLoading ? "Loading…" : root.homeError
+            }
+            Item { width: 1; height: 10 }
+            Sections {
+              x: 8
+              width: parent.width - 16
+              sections: root.homeSections
+            }
+            Item { width: 1; height: 10 }
+          }
+
+          // ---- Settings: the YouTube Music account.
+          Column {
+            visible: root.page === null && root.tab === "settings"
+            x: 18
+            width: parent.width - 36
+            topPadding: 18
+            bottomPadding: 20
+            spacing: 10
+
+            // ---- Sleep timer.
+            Item {
+              width: parent.width
+              height: sleepHeader.implicitHeight
+
+              SectionHeader { id: sleepHeader; text: "Sleep timer" }
+              Mono {
+                anchors.right: parent.right
+                anchors.baseline: sleepHeader.baseline
+                text: !root.player.sleep ? "" : (root.player.sleep.mode === "end" ? "Stops after this song" : "Pauses in " + root.sleepLabel)
+                color: root.accent
+              }
+            }
+            Flow {
+              width: parent.width
+              spacing: 6
+
+              Repeater {
+                model: root.sleepOptions
+                delegate: Rectangle {
+                  id: sleepOption
+                  required property var modelData
+                  readonly property bool active: root.sleepSelected(modelData.value)
+                  width: sleepOptionLabel.implicitWidth + 24
+                  height: 32
+                  radius: 16
+                  color: active ? root.accent : root.white(0.04)
+                  border.width: 1
+                  border.color: active ? root.accent : (sleepOptionArea.containsMouse ? root.white(0.3) : root.white(0.1))
+
+                  Label {
+                    id: sleepOptionLabel
+                    anchors.centerIn: parent
+                    text: sleepOption.modelData.label
+                    font.pixelSize: 12
+                    weight: Font.Medium
+                    color: sleepOption.active ? "#111111" : root.white(0.8)
+                  }
+                  MouseArea {
+                    id: sleepOptionArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.action("sleep", [sleepOption.modelData.value])
+                  }
+                }
+              }
             }
 
-            SectionHeader { text: "UP NEXT" }
-            Repeater { model: root.player.queue; delegate: QueueRow {} }
-            SectionHeader {
-              visible: root.player.queue.length === 0
-              text: "Queue is empty"
-              font.italic: true
-              font.letterSpacing: 0
+            // ---- Equalizer.
+            Item { width: 1; height: 10 }
+            SectionHeader { text: "Equalizer" }
+            Grid {
+              id: eqGrid
+              width: parent.width
+              columns: 3
+              spacing: 6
+
+              Repeater {
+                model: root.eqPresets
+                delegate: Rectangle {
+                  id: preset
+                  required property var modelData
+                  readonly property bool active: root.player.eq === modelData.value
+                  width: (eqGrid.width - eqGrid.spacing * 2) / 3
+                  height: 10 + 24 + 8 + presetLabel.implicitHeight + 10
+                  radius: 12
+                  color: active ? root.white(0.1) : root.white(0.03)
+                  border.width: 1
+                  border.color: active ? root.accent : (presetArea.containsMouse ? root.white(0.3) : root.white(0.08))
+
+                  Row {
+                    id: presetBars
+                    x: 10
+                    y: 10
+                    width: parent.width - 20
+                    height: 24
+                    spacing: 3
+
+                    Repeater {
+                      model: preset.modelData.gains
+                      delegate: Rectangle {
+                        required property var modelData
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: (presetBars.width - presetBars.spacing * 4) / 5
+                        height: presetBars.height * (30 + modelData * 10) / 100
+                        radius: 2
+                        color: preset.active ? root.accent : root.white(0.35)
+                      }
+                    }
+                  }
+                  Label {
+                    id: presetLabel
+                    x: 10
+                    anchors.top: presetBars.bottom
+                    anchors.topMargin: 8
+                    text: preset.modelData.label
+                    font.pixelSize: 12
+                    weight: Font.Medium
+                    color: preset.active ? "#ffffff" : root.white(0.75)
+                  }
+                  MouseArea {
+                    id: presetArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.action("eq", [preset.modelData.value])
+                  }
+                }
+              }
+            }
+
+            // ---- Volume boost.
+            Item { width: 1; height: 10 }
+            SectionHeader { text: "Volume" }
+            Rectangle {
+              width: parent.width
+              height: boostText.implicitHeight + 20
+              radius: 12
+              color: boostArea.containsMouse ? root.white(0.07) : root.white(0.04)
+              border.width: 1
+              border.color: root.white(0.08)
+
+              Column {
+                id: boostText
+                x: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - 24 - 36 - 12
+                spacing: 2
+
+                Label { text: "Volume boost"; weight: Font.Medium }
+                Label {
+                  width: parent.width
+                  text: "Allow up to 150%. May distort loud tracks."
+                  font.pixelSize: 12
+                  color: root.white(0.45)
+                }
+              }
+              Rectangle {
+                anchors.right: parent.right
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: 36
+                height: 20
+                radius: 10
+                color: root.player.boost ? root.accent : root.white(0.15)
+
+                Rectangle {
+                  x: root.player.boost ? 18 : 2
+                  y: 2
+                  width: 16
+                  height: 16
+                  radius: 8
+                  color: "#ffffff"
+
+                  Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                }
+              }
+              MouseArea {
+                id: boostArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.action("boost")
+              }
+            }
+
+            // ---- The YouTube Music account.
+            Item { width: 1; height: 10 }
+            SectionHeader { text: "Account" }
+
+            // Logged in.
+            Item {
+              visible: root.account.loggedIn
+              width: parent.width
+              height: 44
+
+              Art {
+                id: accountPhoto
+                width: 44
+                height: 44
+                radius: 22
+                source: root.account.photo || ""
+                seed: root.account.name || ""
+              }
+              Column {
+                anchors.left: accountPhoto.right
+                anchors.leftMargin: 12
+                anchors.right: logoutButton.left
+                anchors.rightMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 1
+
+                Label {
+                  width: parent.width
+                  text: root.account.name || "Logged in"
+                  weight: Font.Medium
+                }
+                Label {
+                  width: parent.width
+                  visible: text !== ""
+                  text: root.account.handle || ""
+                  font.pixelSize: 12
+                  color: root.white(0.45)
+                }
+              }
+              Pill {
+                id: logoutButton
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Log out"
+                icon: "logout"
+                onClicked: root.logout()
+              }
+            }
+
+            // Not logged in: paste request headers from the browser.
+            Label {
+              visible: !root.account.loggedIn
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              lineHeight: 1.2
+              font.pixelSize: 12
+              color: root.white(0.7)
+              text: "Log in to like songs and see your library and personal home. Search and playback work without it.\n\n"
+                + "1. Open music.youtube.com in your browser, signed in.\n"
+                + "2. Open the developer tools (F12) → Network, and reload the page.\n"
+                + "3. Find a POST request to “browse”, right-click → Copy → Copy request headers.\n"
+                + "4. Paste them below and press Log in."
+            }
+            Rectangle {
+              visible: !root.account.loggedIn
+              width: parent.width
+              height: 110
+              radius: 12
+              color: root.white(0.06)
+              border.width: 1
+              border.color: headersEdit.activeFocus ? root.white(0.18) : root.white(0.08)
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.IBeamCursor
+                onClicked: headersEdit.forceActiveFocus()
+              }
+              Flickable {
+                id: headersScroll
+                anchors.fill: parent
+                anchors.margins: 10
+                contentWidth: width
+                contentHeight: headersEdit.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                TextEdit {
+                  id: headersEdit
+                  width: headersScroll.width
+                  wrapMode: TextEdit.WrapAnywhere
+                  selectByMouse: true
+                  textFormat: TextEdit.PlainText
+                  color: "#ffffff"
+                  selectionColor: root.white(0.25)
+                  font.family: root.monoFont
+                  font.pixelSize: 11
+                  Keys.onEscapePressed: function(event) {
+                    root.close()
+                    event.accepted = true
+                  }
+                }
+              }
+              Label {
+                anchors.fill: headersScroll
+                visible: headersEdit.text === ""
+                text: "Paste request headers here"
+                color: root.white(0.38)
+              }
+            }
+            Pill {
+              visible: !root.account.loggedIn
+              text: root.loginBusy ? "Checking…" : "Log in"
+              icon: "account"
+              primary: true
+              onClicked: root.login()
+            }
+            Label {
+              visible: !root.account.loggedIn && root.loginError !== ""
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              text: root.loginError
+              font.pixelSize: 12
+              color: root.accent
+            }
+            Label {
+              visible: !root.account.loggedIn
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              font.pixelSize: 11
+              color: root.white(0.4)
+              text: "The headers contain your login cookie. They're saved only on this computer, in ~/.config/ytm-bar/browser.json, readable by you alone."
             }
           }
         }
