@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "crsstha.ytmusic",
+  "name": "YouTube Music",
+  "version": "1.0.0",
+  "author": "crsstha",
+  "description": "Now playing in YouTube Music (Pear Desktop) with controls and the up-next queue. Talks to Pear's API Server plugin; actions go through bin/ytm-bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "omarchy/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "YouTube Music",
+    "description": "Now-playing pill with a player and queue popup",
+    "category": "Media",
+    "allowMultiple": false
+  }
+}

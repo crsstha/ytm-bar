@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""YouTube Music in the desktop bar — helper for the Omarchy plugin
+(crsstha.ytmusic). Talks to Pear Desktop's API Server plugin on localhost.
+
+  ytm-bar auth            Ask Pear for an access token (approve the dialog in
+                          YouTube Music) and save it to ~/.config/ytm-bar/token.
+  ytm-bar state           Like / shuffle / repeat / volume and the queue, as JSON.
+  ytm-bar queue           The queue only, as JSON.
+  ytm-bar toggle | next | previous | like | dislike | shuffle | repeat
+  ytm-bar seek SECONDS    Jump to a position in the current song.
+  ytm-bar volume PERCENT  Set the volume (0-100).
+  ytm-bar jump INDEX      Play the queue item at INDEX.
+  ytm-bar search QUERY    Songs and videos matching QUERY, as JSON.
+  ytm-bar play VIDEO_ID   Play a search result now (after the current song).
+  ytm-bar add VIDEO_ID    Queue a search result to play next.
+  ytm-bar start           Launch YouTube Music hidden, unless it's running.
+  ytm-bar window          Show/hide the YouTube Music window (it lives on the
+                          hidden special:music workspace); launch it if needed.
+
+Every command prints one JSON object with "ok", plus "error" and "code"
+("offline", "unauthorized", "failed") when it didn't work. The live
+now-playing display polls GET /api/v1/song directly from Panel.qml.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PORT = int(os.environ.get("YTM_BAR_PORT", "26538"))
+API = f"http://127.0.0.1:{PORT}"
+CONFIG = Path.home() / ".config/ytm-bar"
+TOKEN = CONFIG / "token"
+CLIENT_ID = "ytm-bar"
+QUEUE_LIMIT = 10
+SEARCH_LIMIT = 10
+SEARCH_KINDS = ("Song", "Video")
+WINDOW_CLASS = "com.github.th-ch.youtube-music"
+WORKSPACE = "music"  # special:music, see omarchy/bindings.lua
+
+ACTIONS = {
+    "toggle": "toggle-play",
+    "next": "next",
+    "previous": "previous",
+    "like": "like",
+    "dislike": "dislike",
+    "shuffle": "shuffle",
+}
+
+
+class ApiError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def read_token():
+    try:
+        return TOKEN.read_text().strip()
+    except OSError:
+        return ""
+
+
+def save_token(token):
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    tmp = TOKEN.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token + "\n")
+    tmp.replace(TOKEN)
+
+
+def request(method, path, body=None, timeout=5, auth=True):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    if auth:
+        token = read_token()
+        if not token:
+            raise ApiError("unauthorized", "Not connected — run ytm-bar auth")
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ApiError("unauthorized", "YouTube Music rejected the token — run ytm-bar auth")
+        raise ApiError("failed", f"YouTube Music returned HTTP {e.code}")
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        raise ApiError("offline", "YouTube Music isn't running (or its API Server plugin is off)")
+
+
+def text_of(node):
+    """YouTube renderer text: {"runs": [{"text": ...}]} or {"simpleText": ...}."""
+    if not isinstance(node, dict):
+        return ""
+    if "simpleText" in node:
+        return node["simpleText"]
+    return "".join(run.get("text", "") for run in node.get("runs", []))
+
+
+def simplify_queue(raw):
+    """Reduce Pear's raw YouTube queue object to the rows the panel shows:
+    the current song and the next QUEUE_LIMIT songs after it."""
+    items = (raw or {}).get("items") or []
+    rows = []
+    for index, item in enumerate(items):
+        video = item.get("playlistPanelVideoRenderer")
+        if video is None:
+            wrapper = item.get("playlistPanelVideoWrapperRenderer") or {}
+            video = (wrapper.get("primaryRenderer") or {}).get("playlistPanelVideoRenderer")
+        if not video:
+            continue
+        rows.append({
+            "index": index,
+            "title": text_of(video.get("title")),
+            "artist": text_of(video.get("shortBylineText")),
+            "length": text_of(video.get("lengthText")),
+            "current": bool(video.get("selected")),
+        })
+    current = next((i for i, row in enumerate(rows) if row["current"]), 0)
+    return rows[current:current + QUEUE_LIMIT + 1]
+
+
+def queue():
+    return simplify_queue(request("GET", "/api/v1/queue"))
+
+
+def list_items(node, found):
+    """Every musicResponsiveListItemRenderer in a search response, in order."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "musicResponsiveListItemRenderer":
+                found.append(value)
+            list_items(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            list_items(value, found)
+    return found
+
+
+def simplify_search(raw):
+    """Reduce Pear's raw YouTube search response to playable songs/videos.
+    A result's second column reads "Song • Artist" (or "Song • 4:53" in the
+    top-result card); albums, artists and playlists have no videoId."""
+    results, seen = [], set()
+    for item in list_items(raw, []):
+        video_id = (item.get("playlistItemData") or {}).get("videoId")
+        columns = [text_of((col.get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text"))
+                   for col in item.get("flexColumns") or []]
+        if not video_id or video_id in seen or not columns:
+            continue
+        parts = [p.strip() for p in (columns[1] if len(columns) > 1 else "").split("•") if p.strip()]
+        kind = parts[0] if parts else ""
+        if kind not in SEARCH_KINDS:
+            continue
+        seen.add(video_id)
+        results.append({"videoId": video_id, "title": columns[0], "kind": kind,
+                        "detail": " · ".join(parts[1:])})
+        if len(results) == SEARCH_LIMIT:
+            break
+    return results
+
+
+def search(words):
+    query = " ".join(words).strip()
+    if not query:
+        raise ApiError("failed", "Usage: ytm-bar search QUERY")
+    return simplify_search(request("POST", "/api/v1/search", {"query": query}, timeout=20))
+
+
+def enqueue(args, name, position):
+    if not args or not args[0]:
+        raise ApiError("failed", f"Usage: ytm-bar {name} VIDEO_ID")
+    request("POST", "/api/v1/queue", {"videoId": args[0], "insertPosition": position})
+
+
+def state():
+    like = request("GET", "/api/v1/like-state") or {}
+    shuffle = request("GET", "/api/v1/shuffle") or {}
+    repeat = request("GET", "/api/v1/repeat-mode") or {}
+    volume = request("GET", "/api/v1/volume") or {}
+    return {
+        "like": like.get("state") or "INDIFFERENT",
+        "shuffle": bool(shuffle.get("state")),
+        "repeat": repeat.get("mode") or "NONE",
+        "volume": volume.get("state", 0),
+        "muted": bool(volume.get("isMuted")),
+        "queue": queue(),
+    }
+
+
+def auth():
+    # Pear shows an approve dialog and holds the request until you answer.
+    result = request("POST", f"/auth/{CLIENT_ID}", timeout=120, auth=False) or {}
+    token = result.get("accessToken")
+    if not token:
+        raise ApiError("failed", "YouTube Music didn't return a token")
+    save_token(token)
+    return {}
+
+
+def app_window_open():
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5).stdout
+        return any(c.get("class") == WINDOW_CLASS for c in json.loads(out or "[]"))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def start():
+    """Launch YouTube Music (hidden, by the window rule) unless it's running."""
+    if app_window_open():
+        return {}
+    subprocess.Popen(["uwsm-app", "--", "youtube-music"], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 20
+    while not app_window_open():
+        if time.monotonic() > deadline:
+            raise ApiError("failed", "YouTube Music didn't open a window")
+        time.sleep(0.25)
+    return {}
+
+
+def window():
+    # The window rule sends YouTube Music to the hidden special workspace, so
+    # "show" means toggling that workspace — after launching the app if needed.
+    start()
+    subprocess.run(["hyprctl", "dispatch", f'hl.dsp.workspace.toggle_special("{WORKSPACE}")'],
+                   capture_output=True, timeout=5)
+    return {}
+
+
+def number(args, name):
+    try:
+        return float(args[0])
+    except (IndexError, ValueError):
+        raise ApiError("failed", f"Usage: ytm-bar {name} NUMBER")
+
+
+def run(command, args):
+    if command == "auth":
+        return auth()
+    if command == "state":
+        return state()
+    if command == "queue":
+        return {"queue": queue()}
+    if command in ACTIONS:
+        request("POST", "/api/v1/" + ACTIONS[command])
+        return {}
+    if command == "repeat":
+        request("POST", "/api/v1/switch-repeat", {"iteration": 1})
+        return {}
+    if command == "seek":
+        request("POST", "/api/v1/seek-to", {"seconds": max(0, number(args, "seek"))})
+        return {}
+    if command == "volume":
+        request("POST", "/api/v1/volume", {"volume": min(100, max(0, number(args, "volume")))})
+        return {}
+    if command == "jump":
+        request("PATCH", "/api/v1/queue", {"index": int(number(args, "jump"))})
+        return {}
+    if command == "search":
+        return {"results": search(args)}
+    if command == "play":
+        enqueue(args, "play", "INSERT_AFTER_CURRENT_VIDEO")
+        request("POST", "/api/v1/next")
+        return {}
+    if command == "add":
+        enqueue(args, "add", "INSERT_AFTER_CURRENT_VIDEO")
+        return {}
+    if command == "start":
+        return start()
+    if command == "window":
+        return window()
+    raise ApiError("failed", f"Unknown command {command!r} — see ytm-bar --help")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    try:
+        result = {"ok": True, **run(args[0], args[1:])}
+    except ApiError as e:
+        result = {"ok": False, "code": e.code, "error": str(e)}
+    print(json.dumps(result))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

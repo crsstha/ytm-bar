@@ -1,0 +1,7 @@
+# Never commit secrets or generated data
+token
+*.bak
+*.bak.*
+.*.bak
+__pycache__/
+*.pyc
