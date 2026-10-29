@@ -1,5 +1,5 @@
 #!/bin/bash
-# Remove what install.sh set up. Keeps your token (~/.config/ytm-bar) unless --purge.
+# Remove what install.sh set up. Keeps your login (~/.config/ytm-bar) unless --purge.
 set -euo pipefail
 
 NAME=ytm-bar
@@ -23,6 +23,9 @@ remove_block() {
 }
 
 echo "==> Uninstalling $NAME"
+systemctl --user disable --now ytm-bar.service >/dev/null 2>&1 || true
+unlink_if_ours "$HOME/.config/systemd/user/ytm-bar.service"
+systemctl --user daemon-reload || true
 unlink_if_ours "$HOME/.local/bin/ytm-bar"
 
 if command -v omarchy >/dev/null 2>&1; then
@@ -33,10 +36,11 @@ remove_block "$HOME/.config/hypr/bindings.lua"
 remove_block "$HOME/.config/hypr/autostart.lua"
 hyprctl reload >/dev/null 2>&1 || true
 
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ytm-bar"
 if (( purge )); then
   rm -rf "$HOME/.config/ytm-bar"
-  echo "    removed the API token"
+  echo "    removed the YouTube Music login"
 else
-  echo "    kept ~/.config/ytm-bar (API token) — use --purge to remove it"
+  echo "    kept ~/.config/ytm-bar (YouTube Music login) — use --purge to remove it"
 fi
-echo "==> Done. YouTube Music itself stays installed (pear-desktop-bin)."
+echo "==> Done"
