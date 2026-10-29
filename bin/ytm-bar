@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
 """YouTube Music in the desktop bar — helper for the Omarchy plugin
-(crsstha.ytmusic). Plays YouTube Music without the app: ytmusicapi for search
-and radio, mpv + yt-dlp for the audio.
+(crsstha.ytmusic). Plays YouTube Music without the app: ytmusicapi for search,
+browsing and radio, mpv + yt-dlp for the audio.
 
   ytm-bar daemon          Run the player service (systemd: ytm-bar.service).
                           It owns mpv and the queue, and serves the commands
                           below on 127.0.0.1.
   ytm-bar start           Start the service, unless it's running.
-  ytm-bar login           Connect your YouTube Music account (likes, personal
-                          radio): paste request headers from your browser.
+  ytm-bar login           Connect your YouTube Music account (likes, library,
+                          personal home): paste request headers from your browser.
   ytm-bar logout          Forget the account.
+  ytm-bar account         Whether you're logged in, and as whom.
   ytm-bar song            The current song, as JSON.
   ytm-bar state           Like / shuffle / repeat / volume and the queue, as JSON.
   ytm-bar queue           The queue only, as JSON.
   ytm-bar toggle | next | previous | like | dislike | shuffle | repeat
   ytm-bar seek SECONDS    Jump to a position in the current song.
-  ytm-bar volume PERCENT  Set the volume (0-100).
+  ytm-bar volume PERCENT  Set the volume (0-100, or 0-150 with boost).
+  ytm-bar mute | boost    Toggle mute / volume boost (up to 150%).
+  ytm-bar eq PRESET       flat, bass, vocal, treble, loudness or night.
+  ytm-bar sleep MINUTES|end|off
+                          Pause after MINUTES of playing, or when this song ends.
+  ytm-bar remove INDEX | playnext INDEX | move FROM TO
+                          Edit the queue (INDEX as in "ytm-bar queue").
   ytm-bar jump INDEX      Play the queue item at INDEX.
-  ytm-bar search QUERY    Songs and videos matching QUERY, as JSON.
+  ytm-bar search QUERY [--filter all|songs|videos|albums|artists|playlists]
+  ytm-bar home            Your YouTube Music home page, as sections.
+  ytm-bar library         Your playlists, albums and artists (needs login).
+  ytm-bar open TYPE ID    An album, artist or playlist, as sections.
   ytm-bar play VIDEO_ID   Play a song now, followed by its radio.
   ytm-bar add VIDEO_ID    Queue a song to play next.
+  ytm-bar playall TYPE ID [INDEX]
+                          Replace the queue with an album, playlist or an
+                          artist's songs, starting at INDEX.
 
-Every command except daemon and login prints one JSON object with "ok", plus
-"error" and "code" ("offline", "unauthorized", "failed") when it didn't work.
+Every command except daemon prints one JSON object with "ok", plus "error"
+and "code" ("offline", "unauthorized", "failed") when it didn't work.
 The live now-playing display polls GET /song directly from Panel.qml.
 """
 
@@ -36,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,23 +69,63 @@ MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock
 SERVICE = "ytm-bar.service"
 WATCH_URL = "https://music.youtube.com/watch?v="
 QUEUE_LIMIT = 10
-SONG_RESULTS = 7
-VIDEO_RESULTS = 3
 RADIO_LIMIT = 25
 RADIO_AHEAD = 3  # fetch more radio when this few songs are left
+COLLECTION_LIMIT = 100
+HOME_TTL = 600  # seconds the home page is cached
 REPEAT_MODES = ["NONE", "ALL", "ONE"]
 LIKE_STATES = ("LIKE", "DISLIKE", "INDIFFERENT")
+COLLECTIONS = ("album", "artist", "playlist")
+
+# Search filters: (section title, entry type, results in "all", results when filtered).
+FILTERS = {
+    "songs": ("Songs", "song", 6, 20),
+    "videos": ("Videos", "video", 3, 20),
+    "albums": ("Albums", "album", 4, 20),
+    "artists": ("Artists", "artist", 3, 20),
+    "playlists": ("Playlists", "playlist", 3, 20),
+}
 
 USAGE = {
     "seek": "Usage: ytm-bar seek NUMBER",
     "volume": "Usage: ytm-bar volume NUMBER",
     "jump": "Usage: ytm-bar jump NUMBER",
-    "search": "Usage: ytm-bar search QUERY",
+    "search": "Usage: ytm-bar search QUERY [--filter all|songs|videos|albums|artists|playlists]",
     "play": "Usage: ytm-bar play VIDEO_ID",
     "add": "Usage: ytm-bar add VIDEO_ID",
+    "open": "Usage: ytm-bar open album|artist|playlist ID",
+    "playall": "Usage: ytm-bar playall album|artist|playlist ID [INDEX]",
+    "sleep": "Usage: ytm-bar sleep MINUTES|end|off",
+    "eq": "Usage: ytm-bar eq flat|bass|vocal|treble|loudness|night",
+    "remove": "Usage: ytm-bar remove INDEX",
+    "playnext": "Usage: ytm-bar playnext INDEX",
+    "move": "Usage: ytm-bar move FROM TO",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
-            "shuffle", "repeat", *USAGE}
+            "shuffle", "repeat", "home", "library", "account", "login", "logout",
+            "mute", "boost", *USAGE}
+
+# Equalizer presets: gains in dB for five bands, as in the design.
+EQ_BANDS = (60, 230, 910, 3600, 14000)
+EQ_PRESETS = {
+    "flat": (0, 0, 0, 0, 0),
+    "bass": (5, 4, 1, 0, 0),
+    "vocal": (-1, 0, 4, 3, 0),
+    "treble": (0, 0, 1, 4, 5),
+    "loudness": (5, 2, 0, 2, 5),
+    "night": (-1, 0, 2, 1, -1),
+}
+BOOST_MAX = 150  # volume % allowed with boost on
+
+
+def eq_filter(name):
+    """mpv's audio filter for a preset: one peaking filter per band, after
+    lowering the level by the biggest boost so loud songs don't clip."""
+    gains = EQ_PRESETS[name]
+    if not any(gains):
+        return ""
+    bands = [f"equalizer=f={f}:t=o:w=1.5:g={g}" for f, g in zip(EQ_BANDS, gains) if g]
+    return "lavfi=[" + ",".join([f"volume={-max(0, *gains)}dB"] + bands) + "]"
 
 
 class ApiError(Exception):
@@ -101,25 +155,31 @@ def seconds_of(text):
     return total
 
 
-def image_of(item):
+def image_of(item, size=544):
     """The largest thumbnail. Album art URLs carry their size (=w60-h60), so ask
     for a bigger square instead."""
     thumbs = item.get("thumbnails") or item.get("thumbnail") or []
     if not thumbs:
         return ""
     url = max(thumbs, key=lambda t: t.get("width") or 0).get("url", "")
-    return re.sub(r"=w\d+-h\d+", "=w544-h544", url)
+    return re.sub(r"=w\d+-h\d+", f"=w{size}-h{size}", url)
+
+
+def joined(*parts):
+    return " · ".join(p for p in parts if p)
 
 
 def track_of(item):
-    """A search result or radio track, reduced to what the player needs."""
+    """A song from search, radio, an album or a playlist, reduced to what the
+    player needs."""
     length = item.get("duration") or item.get("length") or ""
     duration = item.get("duration_seconds") or seconds_of(length)
+    album = item.get("album")
     return {
         "videoId": item["videoId"],
         "title": item.get("title") or "",
         "artist": artists_of(item),
-        "album": (item.get("album") or {}).get("name") or "",
+        "album": album if isinstance(album, str) else (album or {}).get("name") or "",
         "length": length or (clock(duration) if duration else ""),
         "duration": duration,
         "image": image_of(item),
@@ -127,29 +187,96 @@ def track_of(item):
     }
 
 
-def search_row(item, kind):
-    detail = [artists_of(item)]
-    if kind == "Video" and item.get("views"):
-        detail.append(item["views"] + " views")
-    elif item.get("duration"):
-        detail.append(item["duration"])
-    return {"videoId": item["videoId"], "title": item.get("title") or "", "kind": kind,
-            "detail": " · ".join(d for d in detail if d)}
+def entry_of(item):
+    """Any ytmusicapi item (song, video, album, artist, playlist) as a panel row:
+    {type, id, title, subtitle, length, image}. None for things the player
+    can't use (episodes, podcasts, profiles, unavailable songs)."""
+    kind = item.get("resultType")
+    browse = item.get("browseId") or ""
+    if kind in ("episode", "podcast", "profile", "station"):
+        return None
+    if item.get("videoId") and kind in (None, "song", "video"):
+        if item.get("isAvailable") is False:
+            return None
+        is_video = kind == "video"
+        track = track_of(item)
+        views = item.get("views") + " views" if is_video and item.get("views") else ""
+        # Some search results come without their artist; say what it is instead.
+        artist = track["artist"] or ("Video" if is_video else "Song")
+        return {"type": "video" if is_video else "song", "id": item["videoId"],
+                "title": track["title"], "subtitle": joined(artist, views),
+                "length": track["length"], "image": image_of(item, 120)}
+    if browse.startswith("MPRE"):
+        year = item.get("year") or ""
+        return {"type": "album", "id": browse, "title": item.get("title") or "",
+                "subtitle": joined(item.get("type") or "Album", artists_of(item), year if year.isdigit() else ""),
+                "length": "", "image": image_of(item, 120)}
+    if kind == "artist" or browse.startswith("UC"):
+        artist = (item.get("artists") or [{}])[0]
+        subscribers = item.get("subscribers")
+        return {"type": "artist", "id": browse or artist.get("id") or "",
+                "title": item.get("artist") or item.get("title") or artist.get("name") or "",
+                "subtitle": joined("Artist", subscribers + " subscribers" if subscribers else ""),
+                "length": "", "image": image_of(item, 120)}
+    playlist = item.get("playlistId") or (browse[2:] if browse.startswith("VL") else "")
+    if playlist:
+        count = item.get("count") or item.get("itemCount")
+        return {"type": "playlist", "id": playlist, "title": item.get("title") or "",
+                "subtitle": joined("Playlist", item.get("author") if isinstance(item.get("author"), str)
+                                   else artists_of(item), f"{count} songs" if count else ""),
+                "length": "", "image": image_of(item, 120)}
+    return None
 
 
-def merge_results(songs, videos):
-    """Songs first, then a few videos; skip anything without a videoId and repeats."""
-    results, seen = [], set()
-    for items, kind, limit in ((songs, "Song", SONG_RESULTS), (videos, "Video", VIDEO_RESULTS)):
-        count = 0
-        for item in items or []:
-            video_id = item.get("videoId")
-            if not video_id or video_id in seen or count == limit:
-                continue
-            seen.add(video_id)
-            results.append(search_row(item, kind))
-            count += 1
-    return results
+def entries_of(items, limit=None, numbered=False):
+    """Rows for a list of items: unusable ones and repeats dropped. Numbered rows
+    carry their position, for playing an album or playlist from that song."""
+    rows, seen = [], set()
+    for item in items or []:
+        row = entry_of(item)
+        if row is None or not row["id"] or (row["type"], row["id"]) in seen:
+            continue
+        seen.add((row["type"], row["id"]))
+        if numbered:
+            row["index"] = len(rows)
+        rows.append(row)
+        if len(rows) == limit:
+            break
+    return rows
+
+
+def search_sections(items, filter_name="all"):
+    """Group search results like YouTube Music: the top result, then a section
+    per type (or one section for a filtered search)."""
+    if filter_name != "all":
+        title, _, _, limit = FILTERS[filter_name]
+        rows = entries_of(items, limit)
+        return [{"title": title, "items": rows}] if rows else []
+    sections = []
+    top = [item for item in items or [] if item.get("category") == "Top result"][:1]
+    top_rows = entries_of(top)
+    if top_rows:
+        sections.append({"title": "Top result", "items": top_rows})
+    shown = {(row["type"], row["id"]) for row in top_rows}
+    rows = [row for row in entries_of(items) if (row["type"], row["id"]) not in shown]
+    for title, kind, limit, _ in FILTERS.values():
+        of_kind = [row for row in rows if row["type"] == kind][:limit]
+        if of_kind:
+            sections.append({"title": title, "items": of_kind})
+    return sections
+
+
+def normalize_headers(text):
+    """Request headers as "name: value" lines. Chromium's DevTools (without
+    "Raw") shows each name on one line and its value on the next; HTTP/2
+    pseudo-headers (:authority, :path, ...) aren't real headers, so drop them."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    named = sum(bool(re.match(r"^:?[\w-]+: ", line)) for line in lines)
+    if named * 2 >= len(lines):
+        pairs = [line.split(": ", 1) for line in lines if ": " in line]
+    else:
+        pairs = list(zip(lines[0::2], lines[1::2]))
+    return "\n".join(f"{name}: {value}" for name, value in pairs if not name.startswith(":"))
 
 
 def video_id_of(url):
@@ -172,7 +299,7 @@ class Mpv:
         self.proc = subprocess.Popen([
             "mpv", "--idle=yes", "--no-video", "--no-terminal", "--audio-display=no",
             f"--input-ipc-server={MPV_SOCKET}", "--ytdl-format=bestaudio/best",
-            "--prefetch-playlist=yes", f"--volume={volume}",
+            "--prefetch-playlist=yes", f"--volume={volume}", f"--volume-max={BOOST_MAX}",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 10
         while True:
@@ -258,31 +385,61 @@ class Player:
         self.lock = threading.RLock()
         self.mpv = None
         self.tracks = {}  # videoId -> track_of(...)
+        self.collections = {}  # (type, id) -> [track, ...] for playall
         self.radio_seeds = set()
         self.shuffle = False
         self.repeat = "NONE"
         self.volume = 70
+        self.eq = "flat"
+        self.boost = False
+        self.muted = False
+        # Sleep timer: {"mode": "min", "left": seconds, "minutes": n} counts down
+        # while playing; {"mode": "end"} pauses when the current song ends.
+        self.sleep = None
         self._yt = None
         self._yt_auth = None
+        self._home = (0, None, None)  # (time, auth, sections)
+        self._account = (None, None)  # (auth, info)
         try:
-            self.volume = int(json.loads(STATE_FILE.read_text()).get("volume", self.volume))
+            saved = json.loads(STATE_FILE.read_text())
+            self.volume = int(saved.get("volume", self.volume))
+            self.eq = saved.get("eq") if saved.get("eq") in EQ_PRESETS else self.eq
+            self.boost = bool(saved.get("boost", False))
         except (OSError, ValueError, AttributeError):
             pass
+        self.volume = min(self.volume, self.max_volume)
 
-    # -- ytmusicapi, signed in when ytm-bar login saved headers.
+    @property
+    def max_volume(self):
+        return BOOST_MAX if self.boost else 100
+
+    def save(self):
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost}))
+        except OSError:
+            pass
+
+    # -- ytmusicapi, signed in when login saved headers.
 
     @property
     def logged_in(self):
         return AUTH_FILE.exists()
 
+    def auth_stamp(self):
+        return AUTH_FILE.stat().st_mtime if self.logged_in else None
+
     def yt(self):
-        auth = AUTH_FILE.stat().st_mtime if self.logged_in else None
+        auth = self.auth_stamp()
         if self._yt is None or auth != self._yt_auth:
-            from ytmusicapi import YTMusic
+            try:
+                from ytmusicapi import YTMusic
+            except ImportError:
+                raise ApiError("failed", "ytmusicapi isn't installed — run: omarchy pkg add python-ytmusicapi")
             try:
                 self._yt = YTMusic(str(AUTH_FILE)) if auth else YTMusic()
             except Exception as e:
-                raise ApiError("unauthorized", f"Couldn't read the login — run ytm-bar login ({e})")
+                raise ApiError("unauthorized", f"Couldn't read the login — log in again ({e})")
             self._yt_auth = auth
         return self._yt
 
@@ -294,6 +451,18 @@ class Player:
         except Exception as e:
             raise ApiError("failed", f"YouTube Music: {e}")
 
+    def remember(self, items, image=""):
+        """Keep track details for songs we may queue, so the panel can show them."""
+        tracks = []
+        for item in items or []:
+            if item.get("videoId") and item.get("isAvailable") is not False:
+                track = track_of(item)
+                track["image"] = track["image"] or image
+                known = self.tracks.setdefault(track["videoId"], track)
+                known.update({k: v for k, v in track.items() if v})
+                tracks.append(known)
+        return tracks
+
     # -- mpv, started on first use.
 
     def player(self, start=True):
@@ -304,11 +473,27 @@ class Player:
                 self.mpv = Mpv(self.volume, self.on_event)
                 self.mpv.command("observe_property", 1, "playlist-pos")
                 self.apply_repeat()
+                self.mpv.set("af", eq_filter(self.eq))
+                self.mpv.set("mute", self.muted)
             return self.mpv
 
     def on_event(self, message):
-        if message.get("event") == "property-change" and message.get("name") == "playlist-pos":
-            self.song_changed(message.get("data"))
+        """A new song: when the position changes, and again once it has loaded.
+        The position event can arrive before mpv's playlist is updated (and
+        doesn't fire when "play" replaces song 0 with another song 0), so
+        file-loaded makes sure the radio check always runs."""
+        event = message.get("event")
+        try:
+            if event == "property-change" and message.get("name") == "playlist-pos":
+                self.song_changed(message.get("data"))
+            elif event == "file-loaded" and self.mpv:
+                self.song_changed(self.mpv.get("playlist-pos", -1))
+            elif event == "end-file" and message.get("reason") == "eof" and self.sleep and self.sleep["mode"] == "end":
+                # Sleep timer "end of song": the next song loads paused.
+                self.sleep = None
+                self.mpv.set("pause", True)
+        except Exception:  # runs in its own thread: log it (journalctl --user -u ytm-bar)
+            traceback.print_exc()
 
     def playlist(self):
         mpv = self.player(start=False)
@@ -338,14 +523,13 @@ class Player:
             if video_id in self.radio_seeds or self.repeat != "NONE":
                 return
             self.radio_seeds.add(video_id)
-        radio = self.call("get_watch_playlist", videoId=video_id, limit=RADIO_LIMIT)
+        try:
+            radio = self.call("get_watch_playlist", videoId=video_id, limit=RADIO_LIMIT)
+        except ApiError:
+            self.radio_seeds.discard(video_id)  # try again next time
+            raise
         queued = {video_id_of(item.get("filename")) for item in playlist}
-        for item in radio.get("tracks") or []:
-            if not item.get("videoId"):
-                continue
-            track = track_of(item)
-            self.tracks.setdefault(track["videoId"], track).update(
-                {k: v for k, v in track.items() if v is not None})
+        for track in self.remember(radio.get("tracks")):
             if track["videoId"] not in queued:
                 queued.add(track["videoId"])
                 self.player().command("loadfile", WATCH_URL + track["videoId"], "append")
@@ -357,7 +541,7 @@ class Player:
             if item.get("videoId") == video_id:
                 track = track_of(item)
                 track["like"] = track["like"] or "INDIFFERENT"
-                self.tracks[video_id] = track
+                self.tracks[video_id] = {**self.tracks.get(video_id, {}), **{k: v for k, v in track.items() if v}}
 
     # -- What the panel reads.
 
@@ -399,21 +583,175 @@ class Player:
                 "title": track.get("title") or item.get("title") or item.get("filename"),
                 "artist": track.get("artist", ""),
                 "length": track.get("length", ""),
+                "image": re.sub(r"=w544-h544", "=w120-h120", track.get("image", "")),
                 "current": bool(item.get("current")),
             })
-        return {"queue": rows}
+        return {"queue": rows, "queueCount": len(playlist) - start if playlist else 0}
 
     def state(self, args):
         track, mpv = self.current()
+        sleep = self.sleep
         return {
             "like": (track or {}).get("like") or "INDIFFERENT",
             "shuffle": self.shuffle,
             "repeat": self.repeat,
             "volume": self.volume,
-            "muted": bool(mpv and mpv.get("mute", False)),
+            "maxVolume": self.max_volume,
+            "boost": self.boost,
+            "eq": self.eq,
+            "sleep": dict(sleep) if sleep else None,
+            "muted": self.muted,
             "loggedIn": self.logged_in,
             **self.queue(args),
         }
+
+    # -- Browsing.
+
+    def search(self, args):
+        query, filter_name = args[0], (args[1] if len(args) > 1 else "all")
+        if filter_name != "all" and filter_name not in FILTERS:
+            raise ApiError("failed", USAGE["search"])
+        if filter_name == "all":
+            items = self.call("search", query)
+        else:
+            items = self.call("search", query, filter=filter_name, limit=FILTERS[filter_name][3])
+        self.remember(items)
+        return {"sections": search_sections(items, filter_name)}
+
+    def home(self, args):
+        stamp = self.auth_stamp()
+        cached_at, cached_auth, sections = self._home
+        if sections is None or cached_auth != stamp or time.monotonic() - cached_at > HOME_TTL:
+            sections = []
+            for shelf in self.call("get_home", limit=6):
+                self.remember(shelf.get("contents"))
+                rows = entries_of(shelf.get("contents"), 6)
+                if rows:
+                    sections.append({"title": shelf.get("title") or "", "items": rows})
+            self._home = (time.monotonic(), stamp, sections)
+        return {"sections": sections}
+
+    def library(self, args):
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to see your library")
+        with ThreadPoolExecutor(3) as pool:
+            playlists = pool.submit(self.call, "get_library_playlists", limit=25)
+            albums = pool.submit(self.call, "get_library_albums", limit=25)
+            artists = pool.submit(self.call, "get_library_subscriptions", limit=25)
+            shelves = [("Playlists", playlists.result()), ("Albums", albums.result()),
+                       ("Artists", artists.result())]
+        sections = [{"title": title, "items": rows} for title, items in shelves if (rows := entries_of(items))]
+        # Liked Music (playlist "LM") isn't always among the library playlists; put it first.
+        liked = {"type": "playlist", "id": "LM", "title": "Liked Music", "subtitle": "Playlist · Your likes",
+                 "length": "", "image": ""}
+        if not sections or sections[0]["title"] != "Playlists":
+            sections.insert(0, {"title": "Playlists", "items": []})
+        playlists = sections[0]["items"]
+        sections[0]["items"] = [liked] + [row for row in playlists if row["id"] != "LM"]
+        return {"sections": sections}
+
+    def open(self, args):
+        """An album, artist or playlist page: a header and its sections. The
+        songs are kept for playall."""
+        kind, item_id = args[0], args[1]
+        if kind == "album":
+            album = self.call("get_album", item_id)
+            image = image_of(album)
+            self.collections[kind, item_id] = self.remember(album.get("tracks"), image)
+            rows = entries_of(album.get("tracks"), numbered=True)
+            for row in rows:
+                row["image"] = row["image"] or image_of(album, 120)
+            count = album.get("trackCount")
+            return {"type": kind, "id": item_id, "title": album.get("title") or "", "image": image,
+                    "subtitle": joined(album.get("type") or "Album", artists_of(album), album.get("year") or "",
+                                       f"{count} songs" if count else ""),
+                    "sections": [{"title": "Songs", "items": rows}]}
+        if kind == "playlist":
+            playlist = self.call("get_playlist", item_id, limit=COLLECTION_LIMIT)
+            self.collections[kind, item_id] = self.remember(playlist.get("tracks"))
+            author = playlist.get("author")
+            count = playlist.get("trackCount")
+            return {"type": kind, "id": item_id, "title": playlist.get("title") or "",
+                    "image": image_of(playlist),
+                    "subtitle": joined("Playlist", (author or {}).get("name") if isinstance(author, dict) else author,
+                                       f"{count} songs" if count else ""),
+                    "sections": [{"title": "Songs", "items": entries_of(playlist.get("tracks"), numbered=True)}]}
+        if kind == "artist":
+            artist = self.call("get_artist", item_id)
+            songs = (artist.get("songs") or {}).get("results") or []
+            self.collections[kind, item_id] = self.remember(songs)
+            sections = [{"title": "Top songs", "items": entries_of(songs, numbered=True)}]
+            for key, title in (("albums", "Albums"), ("singles", "Singles & EPs")):
+                rows = entries_of((artist.get(key) or {}).get("results"))
+                for row in rows:
+                    row["subtitle"] = row["subtitle"].replace(" · " + (artist.get("name") or "-"), "")
+                if rows:
+                    sections.append({"title": title, "items": rows})
+            subscribers = artist.get("subscribers")
+            return {"type": kind, "id": item_id, "title": artist.get("name") or "", "image": image_of(artist),
+                    "subtitle": joined("Artist", subscribers + " subscribers" if subscribers else ""),
+                    "sections": [s for s in sections if s["items"]]}
+        raise ApiError("failed", USAGE["open"])
+
+    def playall(self, args):
+        kind, item_id = args[0], args[1]
+        start = int(float(args[2])) if len(args) > 2 else 0
+        if (kind, item_id) not in self.collections:
+            self.open([kind, item_id])
+        tracks = self.collections.get((kind, item_id)) or []
+        if not tracks:
+            raise ApiError("failed", "Nothing to play here")
+        start = min(max(0, start), len(tracks) - 1)
+        mpv = self.player()
+        with self.lock:
+            mpv.command("stop")  # also clears the playlist
+            for track in tracks:
+                mpv.command("loadfile", WATCH_URL + track["videoId"], "append")
+            mpv.command("playlist-play-index", start)
+            mpv.set("pause", False)
+            if self.shuffle:
+                self.shuffle = False
+                self.shuffle_(args)
+
+    # -- The account.
+
+    def account(self, args):
+        stamp = self.auth_stamp()
+        if stamp is None:
+            return {"loggedIn": False, "name": "", "photo": ""}
+        cached_auth, info = self._account
+        if info is None or cached_auth != stamp:
+            info = self.call("get_account_info")
+            self._account = (stamp, info)
+        return {"loggedIn": True, "name": info.get("accountName") or "",
+                "handle": info.get("channelHandle") or "", "photo": info.get("accountPhotoUrl") or ""}
+
+    def login(self, args):
+        """Save request headers copied from a signed-in music.youtube.com tab,
+        after checking that they work."""
+        headers = normalize_headers(args[0] if args else "")
+        if not headers:
+            raise ApiError("failed", "Paste the request headers first")
+        try:
+            from ytmusicapi import YTMusic, setup
+            auth = setup(headers_raw=headers)
+            info = YTMusic(auth).get_account_info()
+        except ImportError:
+            raise ApiError("failed", "ytmusicapi isn't installed — run: omarchy pkg add python-ytmusicapi")
+        except Exception as e:
+            raise ApiError("unauthorized", f"Those headers didn't work: {e}")
+        CONFIG.mkdir(parents=True, exist_ok=True)
+        tmp = AUTH_FILE.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(auth)
+        tmp.replace(AUTH_FILE)
+        return {"loggedIn": True, "name": info.get("accountName") or ""}
+
+    def logout(self, args):
+        AUTH_FILE.unlink(missing_ok=True)
+        self._account = (None, None)
+        return {"loggedIn": False}
 
     # -- Controls.
 
@@ -422,8 +760,17 @@ class Player:
             self.mpv.command("cycle", "pause")
 
     def next(self, args):
-        if self.current()[0] is not None:
-            self.mpv.command("playlist-next")
+        track, mpv = self.current()
+        if track is None:
+            return
+        # On the last song, fetch its radio first so there's always a next one.
+        playlist, _ = self.playlist()
+        at = self.current_index(playlist)
+        if at >= len(playlist) - 1 and self.repeat == "NONE":
+            self.extend_radio(track["videoId"], playlist)
+            if len(self.playlist()[0]) <= at + 1:
+                raise ApiError("failed", "That's the end of the queue")
+        mpv.command("playlist-next")
 
     def previous(self, args):
         """Back to the start of the song, or the previous one if it just began."""
@@ -440,7 +787,7 @@ class Player:
         if track is None:
             return
         if not self.logged_in:
-            raise ApiError("unauthorized", "Log in to like songs: run ytm-bar login in a terminal")
+            raise ApiError("unauthorized", "Log in (Settings) to like songs")
         new = "INDIFFERENT" if track.get("like") == rating else rating
         self.call("rate_song", track["videoId"], new)
         track["like"] = new
@@ -483,15 +830,93 @@ class Player:
             self.mpv.command("seek", float(args[0]), "absolute")
 
     def volume_(self, args):
-        self.volume = int(min(100, max(0, float(args[0]))))
+        self.volume = int(min(self.max_volume, max(0, float(args[0]))))
+        self.muted = False
         mpv = self.player(start=False)
         if mpv:
             mpv.set("volume", self.volume)
-        try:
-            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"volume": self.volume}))
-        except OSError:
-            pass
+            mpv.set("mute", False)
+        self.save()
+
+    def mute(self, args):
+        self.muted = not self.muted
+        mpv = self.player(start=False)
+        if mpv:
+            mpv.set("mute", self.muted)
+
+    def boost_(self, args):
+        """Allow volume above 100% (up to BOOST_MAX); turning it off caps it again."""
+        self.boost = not self.boost
+        if self.volume > self.max_volume:
+            self.volume_([self.max_volume])
+        self.save()
+
+    def eq_(self, args):
+        name = args[0].lower() if args else ""
+        if name not in EQ_PRESETS:
+            raise ApiError("failed", USAGE["eq"])
+        self.eq = name
+        mpv = self.player(start=False)
+        if mpv:
+            mpv.set("af", eq_filter(name))
+        self.save()
+
+    def sleep_(self, args):
+        value = args[0].lower() if args else ""
+        if value == "off":
+            self.sleep = None
+        elif value == "end":
+            self.sleep = {"mode": "end"}
+        else:
+            try:
+                minutes = int(float(value))
+            except ValueError:
+                raise ApiError("failed", USAGE["sleep"])
+            if minutes <= 0:
+                raise ApiError("failed", USAGE["sleep"])
+            self.sleep = {"mode": "min", "left": minutes * 60, "minutes": minutes}
+
+    def tick(self):
+        """Once a second: run down a minutes sleep timer while music plays."""
+        sleep = self.sleep
+        if not sleep or sleep["mode"] != "min":
+            return
+        track, mpv = self.current()
+        if track is None or mpv.get("pause", False):
+            return
+        sleep["left"] -= 1
+        if sleep["left"] <= 0:
+            self.sleep = None
+            mpv.set("pause", True)
+
+    # -- Editing the queue (indexes are mpv playlist positions).
+
+    def queue_index(self, value):
+        playlist, mpv = self.playlist()
+        index = int(float(value))
+        if not mpv or not 0 <= index < len(playlist):
+            raise ApiError("failed", "That song isn't in the queue any more")
+        return index, self.current_index(playlist), mpv
+
+    def remove(self, args):
+        index, current, mpv = self.queue_index(args[0])
+        if index == current:
+            raise ApiError("failed", "That's the song playing now")
+        mpv.command("playlist-remove", index)
+
+    def playnext(self, args):
+        index, current, mpv = self.queue_index(args[0])
+        if index > current + 1:
+            mpv.command("playlist-move", index, current + 1)
+
+    def move(self, args):
+        """Move a queued song to another place after the current one (drag and drop)."""
+        index, current, mpv = self.queue_index(args[0])
+        target = int(float(args[1]))
+        if index <= current or target <= current or index == target:
+            return
+        # mpv inserts before the item at the target; moving down means one further.
+        mpv.command("playlist-move", index, target + 1 if target > index else target)
 
     def jump(self, args):
         playlist, mpv = self.playlist()
@@ -499,17 +924,6 @@ class Player:
         if mpv and 0 <= index < len(playlist):
             mpv.command("playlist-play-index", index)
             mpv.set("pause", False)
-
-    def search(self, args):
-        query = " ".join(args).strip()
-        with ThreadPoolExecutor(2) as pool:
-            songs = pool.submit(self.call, "search", query, filter="songs", limit=SONG_RESULTS)
-            videos = pool.submit(self.call, "search", query, filter="videos", limit=VIDEO_RESULTS)
-            songs, videos = songs.result(), videos.result()
-        for item in (songs or []) + (videos or []):
-            if item.get("videoId"):
-                self.tracks.setdefault(item["videoId"], track_of(item))
-        return {"results": merge_results(songs, videos)}
 
     def play(self, args):
         """Start a fresh queue with this song; its radio follows."""
@@ -530,6 +944,8 @@ class Player:
         handler = getattr(self, command + "_", None) or getattr(self, command, None)
         if command not in COMMANDS or handler is None:
             raise ApiError("failed", f"Unknown command {command!r}")
+        if command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
+            raise ApiError("failed", USAGE[command])
         return handler(args)
 
 
@@ -587,6 +1003,15 @@ def serve():
 
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     server.daemon_threads = True
+
+    def ticker():
+        while True:
+            time.sleep(1)
+            try:
+                player.tick()
+            except Exception:
+                traceback.print_exc()
+    threading.Thread(target=ticker, daemon=True).start()
     # Stopping the service (SIGTERM) also stops mpv.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
@@ -636,25 +1061,14 @@ def start():
     return {}
 
 
-def login():
-    from ytmusicapi import setup
-    print("Connect ytm-bar to your YouTube Music account:\n"
-          "  1. Open https://music.youtube.com in your browser, signed in.\n"
-          "  2. Open the developer tools (F12) → Network, and reload the page.\n"
-          "  3. Find a POST request to \"browse\", right-click → Copy → Copy request headers.\n"
-          "  4. Paste them below, then press Enter and Ctrl+D.\n", file=sys.stderr)
-    CONFIG.mkdir(parents=True, exist_ok=True)
-    try:
-        setup(filepath=str(AUTH_FILE))
-    except Exception as e:
-        raise ApiError("unauthorized", f"Couldn't use those headers: {e}")
-    AUTH_FILE.chmod(0o600)
-    return {}
-
-
-def logout():
-    AUTH_FILE.unlink(missing_ok=True)
-    return {}
+def read_headers():
+    if sys.stdin.isatty():
+        print("Connect ytm-bar to your YouTube Music account:\n"
+              "  1. Open https://music.youtube.com in your browser, signed in.\n"
+              "  2. Open the developer tools (F12) → Network, and reload the page.\n"
+              "  3. Find a POST request to \"browse\", right-click → Copy → Copy request headers.\n"
+              "  4. Paste them below, then press Enter and Ctrl+D.\n", file=sys.stderr)
+    return sys.stdin.read()
 
 
 def number(args, name):
@@ -667,21 +1081,36 @@ def number(args, name):
 def run(command, args):
     if command == "start":
         return start()
-    if command == "login":
-        return login()
-    if command == "logout":
-        return logout()
     if command not in COMMANDS:
         raise ApiError("failed", f"Unknown command {command!r} — see ytm-bar --help")
-    if command in ("seek", "volume", "jump"):
+    if command in ("seek", "volume", "jump", "remove", "playnext"):
         args = [str(number(args, command))]
+    elif command == "move":
+        if len(args) < 2:
+            raise ApiError("failed", USAGE["move"])
+        args = [str(number(args, "move")), str(number(args[1:], "move"))]
+    elif command == "sleep" and not (args and (args[0] in ("end", "off") or args[0].replace(".", "", 1).isdigit())):
+        raise ApiError("failed", USAGE["sleep"])
+    elif command == "eq" and not (args and args[0].lower() in EQ_PRESETS):
+        raise ApiError("failed", USAGE["eq"])
     elif command == "search":
-        args = [" ".join(args).strip()]
-        if not args[0]:
+        filter_name = "all"
+        if "--filter" in args:
+            at = args.index("--filter")
+            filter_name = args[at + 1] if at + 1 < len(args) else ""
+            args = args[:at] + args[at + 2:]
+        query = " ".join(args).strip()
+        if not query or (filter_name != "all" and filter_name not in FILTERS):
             raise ApiError("failed", USAGE["search"])
+        args = [query, filter_name]
     elif command in ("play", "add") and not (args and args[0]):
         raise ApiError("failed", USAGE[command])
-    result = request("POST", "/" + command, {"args": args}, timeout=30 if command == "search" else 10)
+    elif command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
+        raise ApiError("failed", USAGE[command])
+    elif command == "login":
+        args = [read_headers()]
+    slow = command in ("search", "home", "library", "open", "playall", "login", "account")
+    result = request("POST", "/" + command, {"args": args}, timeout=60 if slow else 10)
     if not result.get("ok"):
         raise ApiError(result.get("code", "failed"), result.get("error", "Failed"))
     result.pop("ok")
