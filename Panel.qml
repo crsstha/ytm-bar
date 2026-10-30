@@ -82,6 +82,10 @@ Panel {
   property string searchError: ""
   property int searchSeq: 0
   readonly property bool searchActive: searchQuery.trim() !== ""
+  // Before you type: recent searches, and moods and genres to browse.
+  property var recentSearches: []
+  property var browseSections: []
+  property bool browseLoading: false
   readonly property bool searching: searchActive && searchedKey !== searchKey()
 
   property var homeSections: []
@@ -215,6 +219,7 @@ Panel {
   function preload() {
     if (root.homeSections.length === 0 && !root.homeLoading) root.loadHome()
     if (root.player.loggedIn && !root.libraryLoaded && !root.libraryLoading) root.loadLibrary()
+    root.loadSearchStart()
   }
   function openFromHotkey() {
     root.open()
@@ -390,7 +395,10 @@ Panel {
       root.loadAccount()
       root.refreshPlayer()
     }
-    if (name === "search") Qt.callLater(function() { searchField.forceActiveFocus() })
+    if (name === "search") {
+      root.loadSearchStart()
+      Qt.callLater(function() { searchField.forceActiveFocus() })
+    }
   }
 
   function openPage(entry) {
@@ -419,6 +427,7 @@ Panel {
   // Songs play (an album or playlist from that song on, like YouTube Music);
   // albums, artists and playlists open as a page.
   function activate(entry, context) {
+    if (root.tab === "search" && root.page === null && root.searchActive) root.rememberSearch()
     if (entry.type === "queue") {
       if (!entry.current) root.action("jump", [String(entry.index)])
     } else if (entry.type === "song" || entry.type === "video") {
@@ -574,6 +583,32 @@ Panel {
       }
       root.libraryLoaded = false
     })
+  }
+
+  function loadSearchStart() {
+    root.call("recent", [], function(result) { if (result.ok) root.recentSearches = result.recent })
+    if (root.browseSections.length > 0 || root.browseLoading) return
+    root.browseLoading = true
+    root.call("browse", [], function(result) {
+      root.browseLoading = false
+      if (result.ok) root.browseSections = result.sections
+    })
+  }
+
+  // Search for `query` now (a recent search was clicked).
+  function searchFor(query) {
+    searchField.text = query
+    root.searchQuery = query
+    searchDebounce.stop()
+    root.runSearch()
+    root.rememberSearch()
+  }
+
+  // Keep the current query among the recent searches.
+  function rememberSearch() {
+    var query = root.searchQuery.trim()
+    if (query === "") return
+    root.call("recentadd", [query], function(result) { if (result.ok) root.recentSearches = result.recent })
   }
 
   function loadStats() {
@@ -1603,7 +1638,7 @@ Panel {
                     onClicked: root.back()
                   }
                   Pill {
-                    visible: root.page !== null && !root.page.loading && !root.page.error
+                    visible: root.page !== null && !root.page.loading && !root.page.error && root.page.type !== "mood"
                     text: "Play"
                     icon: "playFill"
                     primary: true
@@ -2191,6 +2226,7 @@ Panel {
                 onAccepted: {
                   searchDebounce.stop()
                   root.runSearch()
+                  root.rememberSearch()
                 }
                 Keys.onEscapePressed: function(event) {
                   if (text !== "") root.clearSearch()
@@ -2240,6 +2276,144 @@ Panel {
               sections: root.searchSections
               opacity: root.searching ? 0.45 : 1
               Behavior on opacity { NumberAnimation { duration: 160 } }
+            }
+
+            // Nothing typed yet: recent searches, then moods and genres.
+            Column {
+              visible: !root.searchActive
+              x: 18
+              width: parent.width - 36
+              topPadding: 10
+              spacing: 10
+
+              Item {
+                visible: root.recentSearches.length > 0
+                width: parent.width
+                height: recentHeader.implicitHeight
+
+                SectionHeader { id: recentHeader; text: "Recent" }
+                Label {
+                  anchors.right: parent.right
+                  anchors.baseline: recentHeader.baseline
+                  text: "Clear"
+                  font.pixelSize: 11
+                  color: clearRecentArea.containsMouse ? "#ffffff" : root.white(0.4)
+
+                  MouseArea {
+                    id: clearRecentArea
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.call("recentclear", [], function(result) { root.recentSearches = [] })
+                  }
+                }
+              }
+              Flow {
+                visible: root.recentSearches.length > 0
+                width: parent.width
+                spacing: 6
+
+                Repeater {
+                  model: root.recentSearches
+                  delegate: Chip {
+                    required property var modelData
+                    text: modelData
+                    onClicked: root.searchFor(modelData)
+                  }
+                }
+              }
+              Item { visible: root.recentSearches.length > 0; width: 1; height: 4 }
+
+              Repeater {
+                model: root.browseSections
+                delegate: Column {
+                  id: browseSection
+                  required property var modelData
+                  width: parent.width
+                  spacing: 10
+                  bottomPadding: 8
+
+                  SectionHeader { text: browseSection.modelData.title }
+                  Grid {
+                    columns: 2
+                    columnSpacing: 8
+                    rowSpacing: 8
+                    width: parent.width
+
+                    Repeater {
+                      model: browseSection.modelData.items
+                      // A tile in the mood's own colour, with a brighter edge.
+                      delegate: Rectangle {
+                        id: tile
+                        required property var modelData
+                        readonly property real hue: root.hueOf(modelData.title)
+                        width: (browseSection.width - 8) / 2
+                        height: 48
+                        radius: 12
+                        clip: true
+                        scale: tileArea.pressed ? 0.97 : 1
+                        gradient: Gradient {
+                          orientation: Gradient.Horizontal
+                          GradientStop { position: 0; color: Qt.hsla(tile.hue, 0.45, tileArea.containsMouse ? 0.36 : 0.3, 0.9) }
+                          GradientStop { position: 1; color: Qt.hsla(tile.hue, 0.35, 0.16, 0.7) }
+                        }
+                        border.width: 1
+                        border.color: root.white(tileArea.containsMouse ? 0.16 : 0.07)
+
+                        Rectangle {
+                          width: 4
+                          height: parent.height
+                          color: Qt.hsla(tile.hue, 0.7, 0.68, 1)
+                        }
+                        Label {
+                          anchors.left: parent.left
+                          anchors.leftMargin: 16
+                          anchors.right: parent.right
+                          anchors.rightMargin: 10
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: tile.modelData.title
+                          weight: Font.DemiBold
+                          font.pixelSize: 13
+                          color: "#ffffff"
+                        }
+                        MouseArea {
+                          id: tileArea
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.openPage({ type: "mood", id: tile.modelData.id, title: tile.modelData.title,
+                                                     subtitle: "Playlists", image: "" })
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              // Tiles still on their way.
+              Grid {
+                visible: root.browseLoading && root.browseSections.length === 0
+                columns: 2
+                columnSpacing: 8
+                rowSpacing: 8
+                width: parent.width
+
+                SequentialAnimation on opacity {
+                  running: parent.visible
+                  loops: Animation.Infinite
+                  NumberAnimation { from: 0.45; to: 1; duration: 700; easing.type: Easing.InOutSine }
+                  NumberAnimation { from: 1; to: 0.45; duration: 700; easing.type: Easing.InOutSine }
+                }
+                Repeater {
+                  model: 8
+                  delegate: Rectangle {
+                    width: (parent.width - 8) / 2
+                    height: 48
+                    radius: 12
+                    color: root.white(0.06)
+                  }
+                }
+              }
             }
             Item { width: 1; height: 10 }
           }
