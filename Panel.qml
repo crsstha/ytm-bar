@@ -27,10 +27,16 @@ Panel {
 
   // ---- The design's look. The card is see-through; Hyprland blurs what shows
   // through (omarchy/bindings.lua).
-  readonly property color accent: "#f3c98b"
+  // The accent (and the glow) take the colour of the cover; the service works
+  // it out (bin/ytm-bar cover_color), amber until then or without a song.
+  readonly property color defaultAccent: "#f3c98b"
+  property color accent: song && song.color ? song.color : defaultAccent
+  Behavior on accent { ColorAnimation { duration: 700; easing.type: Easing.InOutQuad } }
   readonly property color ink: "#f2f2f0"
   readonly property color cardTint: Qt.rgba(18 / 255, 20 / 255, 24 / 255, 0.62)
-  readonly property color glow: Qt.rgba(233 / 255, 170 / 255, 90 / 255, 0.22)
+  readonly property color glow: Qt.rgba(accent.r, accent.g, accent.b, 0.24)
+  // Up next as a row of covers, or the editable list.
+  property bool queueAsList: false
   readonly property int cardRadius: 22
   readonly property int queueRows: 5
   readonly property string sansFont: geist.status === FontLoader.Ready ? geist.name : root.bar.fontFamily
@@ -136,6 +142,8 @@ Panel {
     volume: "M11 5L6 9H3v6h3l5 4zM15.5 9a4 4 0 0 1 0 6",
     muted: "M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5",
     chevron: "M9 6l6 6-6 6",
+    list: "M9 6h11M9 12h11M9 18h11M5 6v.01M5 12v.01M5 18v.01",
+    grid: "M4 4h6v6h-6zM14 4h6v6h-6zM4 14h6v6h-6zM14 14h6v6h-6z",
     back: "M15 6l-6 6 6 6",
     playNext: "M3 6h12M3 12h12M3 18h8M18 14v8M14 18h8",
     account: "M4 21a8 8 0 0 1 16 0M8 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0",
@@ -833,6 +841,60 @@ Panel {
     }
   }
 
+  // The seek bar as a waveform: one bar per slice of the song, played bars in
+  // the accent. Heights are seeded from the song, so every song has its own.
+  component WaveTrack: Item {
+    id: wave
+    property real value: 0
+    property real maximum: 1
+    property string seed: ""
+    property real dragValue: 0
+    readonly property bool dragging: waveArea.pressed
+    readonly property real shown: dragging ? dragValue : value
+    readonly property real fraction: maximum > 0 ? Math.max(0, Math.min(1, shown / maximum)) : 0
+    readonly property int bars: Math.max(8, Math.floor((width + 2) / 5))
+    readonly property var levels: {
+      var h = 2166136261
+      for (var i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 16777619) >>> 0
+      var out = []
+      for (var b = 0; b < bars; b++) {
+        h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0
+        var noise = (h % 1000) / 1000
+        // Smooth swells with a little grain, quieter at the very ends.
+        var shape = 0.55 + 0.45 * Math.sin(b * 0.37 + (seed.length % 7)) * Math.sin(b * 0.11 + 1.3)
+        var ends = Math.min(1, Math.min(b, bars - 1 - b) / 4 + 0.35)
+        out.push(Math.max(0.12, Math.min(1, (shape * 0.7 + noise * 0.3) * ends)))
+      }
+      return out
+    }
+    signal picked(real value)
+    height: 28
+
+    Repeater {
+      model: wave.bars
+      delegate: Rectangle {
+        required property int index
+        readonly property bool played: (index + 0.5) / wave.bars <= wave.fraction
+        x: index * wave.width / wave.bars
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.max(2, wave.width / wave.bars - 2)
+        height: Math.max(3, wave.height * wave.levels[index])
+        radius: width / 2
+        color: played ? root.accent : root.white(waveArea.containsMouse ? 0.26 : 0.18)
+      }
+    }
+    MouseArea {
+      id: waveArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      function valueAt(x) { return Math.max(0, Math.min(1, x / width)) * wave.maximum }
+      onPressed: function(mouse) { wave.dragValue = valueAt(mouse.x) }
+      onPositionChanged: function(mouse) { if (pressed) wave.dragValue = valueAt(mouse.x) }
+      onReleased: wave.picked(wave.dragValue)
+    }
+  }
+
   // Cover art with rounded corners; a gradient in the song's own hue until
   // (or instead of) the image.
   component Art: Item {
@@ -1405,13 +1467,12 @@ Panel {
               width: parent.width - 36
               spacing: 6
 
-              Track {
+              WaveTrack {
                 id: progress
                 width: parent.width
                 maximum: Math.max(1, root.song ? root.song.songDuration : 1)
                 value: root.elapsed
-                knob: true
-                gradientFill: true
+                seed: root.song ? root.song.videoId : ""
                 onPicked: function(value) { root.seek(value) }
               }
               Item {
@@ -1620,16 +1681,83 @@ Panel {
 
                   SectionHeader { id: upNext; text: "Up next" }
                   Mono {
-                    anchors.right: parent.right
+                    anchors.right: queueMode.left
+                    anchors.rightMargin: 6
                     anchors.baseline: upNext.baseline
                     text: root.player.queueCount + (root.player.queueCount === 1 ? " track" : " tracks")
                     color: root.white(0.35)
                   }
+                  // Covers or the list (where songs can be moved and removed).
+                  IconButton {
+                    id: queueMode
+                    anchors.right: parent.right
+                    anchors.rightMargin: -8
+                    anchors.verticalCenter: upNext.verticalCenter
+                    width: 26
+                    height: 26
+                    iconSize: 14
+                    icon: root.queueAsList ? "grid" : "list"
+                    iconColor: queueModeHover.hovered ? "#ffffff" : root.white(0.45)
+                    HoverHandler { id: queueModeHover }
+                    onClicked: root.queueAsList = !root.queueAsList
+                  }
+                }
+                ListView {
+                  id: coverRow
+                  visible: !root.queueAsList && count > 0
+                  x: 18
+                  width: parent.width - 18
+                  height: visible ? 136 : 0
+                  orientation: ListView.Horizontal
+                  spacing: 12
+                  clip: true
+                  rightMargin: 18
+                  boundsBehavior: Flickable.StopAtBounds
+                  model: root.player.queue.filter(function(item) { return !item.current })
+                  delegate: Item {
+                    id: coverCard
+                    required property var modelData
+                    width: 92
+                    height: 136
+                    scale: coverCardArea.pressed ? 0.96 : 1
+
+                    Art {
+                      width: 92
+                      height: 92
+                      radius: 14
+                      source: coverCard.modelData.image || ""
+                      seed: coverCard.modelData.title
+                      opacity: coverCardArea.containsMouse ? 1 : 0.9
+                    }
+                    Label {
+                      y: 100
+                      width: parent.width
+                      text: coverCard.modelData.title
+                      font.pixelSize: 12
+                      weight: Font.Medium
+                      color: coverCardArea.containsMouse ? "#ffffff" : root.white(0.9)
+                    }
+                    Label {
+                      y: 117
+                      width: parent.width
+                      text: coverCard.modelData.artist || ""
+                      font.pixelSize: 11
+                      color: root.white(0.45)
+                    }
+                    MouseArea {
+                      id: coverCardArea
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.action("jump", [coverCard.modelData.index])
+                    }
+                  }
                 }
                 Flickable {
+                  visible: root.queueAsList
                   x: 8
                   width: parent.width - 16
-                  height: Math.min(queueList.implicitHeight, root.queueRows * 53)
+                  height: visible ? Math.min(queueList.implicitHeight, root.queueRows * 53) : 0
                   contentHeight: queueList.implicitHeight
                   clip: true
                   boundsBehavior: Flickable.StopAtBounds
