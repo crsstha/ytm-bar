@@ -65,7 +65,8 @@ bottom; the main ones:
 | `J` / `K` · `d` · `u` | move · remove · play next |
 | `+` / `-` · `m` · `e` | volume · mute · next eq preset |
 | `s` · `r` · `l` | shuffle · repeat · like |
-| `1`–`4` · `,` · `/` · `q` | tabs · settings · search · quit |
+| `[` / `]` or `1`–`4` · `,` | previous / next tab · settings |
+| `/` · `Esc` · `g` / `G` · `q` | type a search · leave the box or go back · top / end of a list · quit |
 
 ## Command line
 

@@ -217,29 +217,38 @@ class Canvas:
         """A clickable span; with column=True the action gets the clicked column."""
         self.clicks.append((y, x0, x1, action, column))
 
-    def render(self):
-        out = ["\x1b[H"]
-        for y in range(self.h):
-            style = None
-            for x in range(self.w):
-                ch = self.chars[y][x]
-                if ch == "":
-                    continue
-                s = (self.fg[y][x], self.bg[y][x], self.bold[y][x])
-                if s != style:
-                    code = ["0"]
-                    if s[2]:
-                        code.append("1")
-                    if s[0]:
-                        code.append("38;2;%d;%d;%d" % s[0])
-                    if s[1]:
-                        code.append("48;2;%d;%d;%d" % s[1])
-                    out.append("\x1b[" + ";".join(code) + "m")
-                    style = s
-                out.append(ch)
-            out.append("\x1b[0m")
-            if y < self.h - 1:
-                out.append("\r\n")
+    def render(self, previous=None):
+        """The frame as terminal output, and its lines. Only lines that differ
+        from `previous` are written, wrapped in a synchronized update so the
+        terminal never shows half a frame."""
+        lines = [self.line(y) for y in range(self.h)]
+        out = ["\x1b[?2026h"]
+        for y, line in enumerate(lines):
+            if previous is None or y >= len(previous) or previous[y] != line:
+                out.append(f"\x1b[{y + 1};1H" + line)
+        out.append("\x1b[?2026l")
+        return "".join(out), lines
+
+    def line(self, y):
+        """Row y as text with colour escapes."""
+        out, style = [], None
+        for x in range(self.w):
+            ch = self.chars[y][x]
+            if ch == "":
+                continue
+            s = (self.fg[y][x], self.bg[y][x], self.bold[y][x])
+            if s != style:
+                code = ["0"]
+                if s[2]:
+                    code.append("1")
+                if s[0]:
+                    code.append("38;2;%d;%d;%d" % s[0])
+                if s[1]:
+                    code.append("48;2;%d;%d;%d" % s[1])
+                out.append("\x1b[" + ";".join(code) + "m")
+                style = s
+            out.append(ch)
+        out.append("\x1b[0m")
         return "".join(out)
 
 
@@ -260,6 +269,8 @@ class App:
         self.account = {"loggedIn": False, "name": ""}
         self.message = ""
         self.stats = None  # memory in use, while Settings is open
+        self.hold_until = 0.0  # skip polls until then (see predict)
+        self.coalesce = {}  # volume / seek waiting to be sent: name -> args
         self.tab = "now"
         self.pages = []
         self.views = {}  # view key -> {"sel": i, "scroll": n}
@@ -292,15 +303,58 @@ class App:
         if name in ("like", "dislike") and not self.player.get("loggedIn"):
             self.message = "Log in (Settings) to like songs"
             return
+        self.predict(name, args)
+        if name in ("volume", "seek"):
+            # Held keys send many of these: only the latest goes out, 0.15 s on.
+            with self.lock:
+                busy = name in self.coalesce
+                self.coalesce[name] = args
+            if not busy:
+                def send():
+                    time.sleep(0.15)
+                    with self.lock:
+                        latest = self.coalesce.pop(name)
+                    result = call(name, latest, timeout=30)
+                    self.message = "" if result.get("ok") else result.get("error", "That didn't work")
+                    time.sleep(0.3)
+                    self.refresh(force=True)
+                self.run_bg(send)
+            return
 
         def go():
             result = call(name, args, timeout=30)
             self.message = "" if result.get("ok") else result.get("error", "That didn't work")
             time.sleep(0.3)
-            self.refresh()
+            self.refresh(force=True)
         self.run_bg(go)
 
-    def refresh(self):
+    def predict(self, name, args):
+        """Show what an action will do before the service answers, and hold
+        off the regular update for a moment so it doesn't flick back."""
+        p, song, now = self.player, self.song, time.time()
+        if name == "toggle" and song:
+            song["elapsedSeconds"], self.song_at = self.elapsed(), now
+            song["isPaused"] = not song.get("isPaused")
+        elif name == "seek" and song:
+            song["elapsedSeconds"], self.song_at = float(args[0]), now
+        elif name == "volume":
+            p["volume"] = max(0, min(p.get("maxVolume") or 100, int(args[0])))
+            p["muted"] = False
+        elif name == "mute":
+            p["muted"] = not p.get("muted")
+        elif name == "shuffle":
+            p["shuffle"] = not p.get("shuffle")
+        elif name == "repeat":
+            modes = ["NONE", "ALL", "ONE"]
+            p["repeat"] = modes[(modes.index(p.get("repeat", "NONE")) + 1) % 3]
+        else:
+            return
+        self.hold_until = now + 1.2
+        self.dirty.set()
+
+    def refresh(self, force=False):
+        if not force and time.time() < self.hold_until:
+            return  # a predicted change is on screen; let the service catch up
         song = get_song()
         state = call("state") if song != "offline" else None
         stats = call("stats") if state and self.tab == "settings" else None
@@ -393,10 +447,12 @@ class App:
         else:
             self.open_page(entry)
 
-    def set_tab(self, tab):
+    def set_tab(self, tab, typing=None):
+        """Show a tab. Search starts with the cursor in its box, unless you're
+        only passing through it (Tab, [ and ]), so those keys keep working."""
         self.tab = tab
         self.pages = []
-        self.typing = tab == "search"
+        self.typing = tab == "search" if typing is None else typing
         if tab == "home" and self.home is None:
             self.load_home()
         if tab == "library" and self.library is None:
@@ -955,14 +1011,14 @@ class App:
         if self.tab == "now":
             return [("␣", "play"), ("n/p", "next/prev"), ("j/k", "select"), ("⏎", "play sel"),
                     ("J/K", "move"), ("d", "remove"), ("+/-", "vol"), ("m", "mute"), ("s", "shuffle"),
-                    ("r", "repeat"), ("l", "like"), ("e", "eq"), ("q", "quit"), ("u", "up next"),
-                    ("←/→", "seek"), ("D", "dislike"), ("tab", "tabs")]
+                    ("r", "repeat"), ("l", "like"), ("e", "eq"), ("[ ]", "tabs"), ("q", "quit"),
+                    ("u", "up next"), ("←/→", "seek"), ("D", "dislike"), ("g/G", "top/end")]
         if self.tab == "search" and self.typing:
             return [("type", "to search"), ("tab", "filter"), ("↓", "results"), ("esc", "clear/leave")]
         if self.tab == "settings":
             return [("↑↓", "section"), ("←/→", "choose"), ("⏎", "apply"), ("1-4", "tabs"), ("q", "quit")]
-        return [("j/k", "move"), ("⏎", "play/open"), ("a", "play next"), ("/", "search"), ("1-4", "tabs"),
-                (",", "settings"), ("q", "quit")]
+        return [("j/k", "move"), ("⏎", "play/open"), ("a", "play next"), ("/", "search"), ("[ ]", "tabs"),
+                ("g/G", "top/end"), (",", "settings"), ("q", "quit")]
 
     @staticmethod
     def layout_hints(hints, width):
@@ -1006,10 +1062,14 @@ class App:
             self.set_tab(TABS[int(k) - 1][0])
         elif k == ",":
             self.set_tab("settings")
-        elif k == "tab" or k == "shift-tab":
+        elif k in ("tab", "shift-tab", "]", "["):
             order = [t for t, _ in TABS] + ["settings"]
             at = order.index(self.tab) if self.tab in order else 0
-            self.set_tab(order[(at + (1 if k == "tab" else -1)) % len(order)])
+            self.set_tab(order[(at + (1 if k in ("tab", "]") else -1)) % len(order)], typing=False)
+        elif k in ("g", "home"):
+            self.move(-10 ** 6)
+        elif k in ("G", "end"):
+            self.move(10 ** 6)
         elif k == "/":
             self.set_tab("search")
         elif k in ("esc", "backspace"):
@@ -1028,6 +1088,8 @@ class App:
             item = self.selected()
             if item:
                 self.activate(item)
+            elif self.tab == "search" and not self.pages:
+                self.typing = True
         elif k == " ":
             self.action("toggle")
         elif k == "n":
@@ -1213,6 +1275,7 @@ def main():
     enter()
     try:
         last = 0.0
+        size, previous = None, None  # the last frame, to write only what changed
         while app.running:
             if app.login:  # logging in needs the plain terminal for pasting
                 app.login = False
@@ -1222,6 +1285,7 @@ def main():
                 app.load_account()
                 app.home = app.library = None
                 enter()
+                size = None  # the screen was cleared: draw all of it again
                 app.dirty.set()
             if app.search_due and time.time() >= app.search_due:
                 app.search_due = 0
@@ -1231,8 +1295,12 @@ def main():
             if app.dirty.is_set() or now - last > 0.25:
                 app.dirty.clear()
                 cols, rows = shutil.get_terminal_size()
+                if (cols, rows) != size:
+                    size, previous = (cols, rows), None
+                    out.write("\x1b[2J")
                 with app.lock:
-                    out.write(app.draw(cols, rows).render())
+                    text, previous = app.draw(cols, rows).render(previous)
+                out.write(text)
                 out.flush()
                 last = now
             ready, _, _ = select.select([fd], [], [], 0.1)
