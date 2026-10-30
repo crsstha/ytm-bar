@@ -37,6 +37,8 @@ Panel {
   readonly property color glow: Qt.rgba(accent.r, accent.g, accent.b, 0.24)
   // Up next as a row of covers, or the editable list.
   property bool queueAsList: false
+  // Memory in use (ytm-bar stats), refreshed while Settings is open.
+  property var stats: null
   readonly property int cardRadius: 22
   readonly property int queueRows: 5
   readonly property string sansFont: geist.status === FontLoader.Ready ? geist.name : root.bar.fontFamily
@@ -492,6 +494,17 @@ Panel {
         root.loginError = result.error || "Couldn't log in"
       }
     })
+  }
+
+  function loadStats() {
+    root.call("stats", [], function(result) { if (result.ok) root.stats = result })
+  }
+  Timer {
+    interval: 3000
+    repeat: true
+    triggeredOnStart: true
+    running: root.opened && root.tab === "settings" && root.page === null
+    onTriggered: root.loadStats()
   }
 
   // Focus ytm-tui's terminal if it's open, otherwise start one.
@@ -2203,6 +2216,54 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: root.openTui()
               }
+            }
+
+            // ---- Memory: the service and mpv (the popup itself lives in the shell).
+            Item { width: 1; height: 10 }
+            SectionHeader { text: "Memory" }
+            Rectangle {
+              width: parent.width
+              height: 62
+              radius: 12
+              color: root.white(0.04)
+              border.width: 1
+              border.color: root.white(0.08)
+
+              Row {
+                anchors.fill: parent
+                anchors.margins: 12
+
+                Repeater {
+                  model: [
+                    { label: "Player service", value: root.stats ? root.stats.service : null },
+                    { label: "mpv", value: root.stats ? root.stats.mpv : null },
+                    { label: "Total", value: root.stats ? root.stats.total : null }
+                  ]
+                  delegate: Column {
+                    required property var modelData
+                    required property int index
+                    width: (parent.width) / 3
+                    spacing: 3
+
+                    Mono {
+                      text: modelData.value === null ? "—"
+                        : (modelData.value > 0 ? Math.round(modelData.value) + " MB" : "off")
+                      font.pixelSize: 15
+                      color: index === 2 ? root.accent : root.ink
+                    }
+                    Label {
+                      text: modelData.label
+                      font.pixelSize: 11
+                      color: root.white(0.45)
+                    }
+                  }
+                }
+              }
+              Tip {
+                visible: memoryHover.hovered
+                text: "Resident memory. mpv starts with the first song and holds the audio buffers; the popup runs inside the Omarchy shell."
+              }
+              HoverHandler { id: memoryHover }
             }
 
             // ---- The YouTube Music account.

@@ -259,6 +259,7 @@ class App:
         self.player_at = time.time()
         self.account = {"loggedIn": False, "name": ""}
         self.message = ""
+        self.stats = None  # memory in use, while Settings is open
         self.tab = "now"
         self.pages = []
         self.views = {}  # view key -> {"sel": i, "scroll": n}
@@ -302,12 +303,15 @@ class App:
     def refresh(self):
         song = get_song()
         state = call("state") if song != "offline" else None
+        stats = call("stats") if state and self.tab == "settings" else None
         with self.lock:
             if song == "offline":
                 self.status, self.song = "offline", None
             else:
                 self.status, self.song = ("ok" if song else "idle"), song
                 self.song_at = time.time()
+            if stats and stats.get("ok"):
+                self.stats = stats
             if state and state.get("ok"):
                 # "Sign in with Google" finished: show the account, or why not.
                 if self.player.get("signingIn") and not state.get("signingIn"):
@@ -858,6 +862,21 @@ class App:
         c.click(y + 1, x, x + width, lambda: self.action("boost"))
         rows.append(y + 1)
         y += 4
+        # Memory: the service and mpv.
+        c.put(y, x, "MEMORY", white(0.45), bold=True)
+        st = self.stats
+        if st:
+            mb = lambda v: f"{round(v)} MB" if v else "off"
+            at = x
+            for label, value, color in (("service", st["service"], INK), ("mpv", st["mpv"], INK),
+                                        ("total", st["total"], ACCENT)):
+                c.put(y + 1, at, label + " ", white(0.45))
+                at += len(label) + 1
+                c.put(y + 1, at, mb(value), color)
+                at += len(mb(value)) + 4
+        else:
+            c.put(y + 1, x, "…", white(0.45))
+        y += 3
         # Account.
         c.put(y, x, "ACCOUNT", white(0.45), bold=True)
         focus = self.settings_row == 3
