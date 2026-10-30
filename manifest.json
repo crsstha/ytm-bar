@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "crsstha.ytmusic",
-  "name": "YouTube Music",
+  "name": "YTM Bar",
   "version": "1.0.0",
   "author": "crsstha & Claude",
   "license": "MIT",
@@ -13,7 +13,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "YouTube Music",
+    "displayName": "YTM Bar",
     "description": "Now-playing pill with a player and queue popup",
     "category": "Media",
     "allowMultiple": false,
