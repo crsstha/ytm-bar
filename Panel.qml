@@ -208,6 +208,13 @@ Panel {
     if (root.tab === "now" && !root.song && root.pages.length === 0) root.setTab("search")
     root.controller.show()
     root.refreshPlayer()
+    Qt.callLater(root.preload)
+  }
+
+  // Fetch the tabs' content before they're opened, so switching is instant.
+  function preload() {
+    if (root.homeSections.length === 0 && !root.homeLoading) root.loadHome()
+    if (root.player.loggedIn && !root.libraryLoaded && !root.libraryLoading) root.loadLibrary()
   }
   function openFromHotkey() {
     root.open()
@@ -376,8 +383,9 @@ Panel {
     root.tab = name
     root.pages = []
     scroller.contentY = 0
-    if (name === "home" && root.homeSections.length === 0) root.loadHome()
-    if (name === "library" && !root.libraryLoaded) root.loadLibrary()
+    if (name === "home" && root.homeSections.length === 0 && !root.homeLoading) root.loadHome()
+    if (name === "library" && !root.libraryLoaded && !root.libraryLoading) root.loadLibrary()
+    tabFade.restart()
     if (name === "settings") {
       root.loadAccount()
       root.refreshPlayer()
@@ -391,6 +399,7 @@ Panel {
                  image: entry.image, sections: [], loading: true, error: "" })
     root.pages = stack
     scroller.contentY = 0
+    tabFade.restart()
     root.call("open", [entry.type, entry.id], function(result) {
       var at = root.pages.findIndex(function(p) { return p.type === entry.type && p.id === entry.id })
       if (at < 0) return
@@ -404,6 +413,7 @@ Panel {
   function back() {
     root.pages = root.pages.slice(0, -1)
     scroller.contentY = 0
+    tabFade.restart()
   }
 
   // Songs play (an album or playlist from that song on, like YouTube Music);
@@ -704,6 +714,57 @@ Panel {
   }
 
   // Loading, empty and error lines, centred like the design's empty state.
+  // Placeholder rows while a list loads: the shape of the rows to come,
+  // gently pulsing, so nothing jumps when the results arrive.
+  component Skeleton: Column {
+    id: skeleton
+    property int rows: 5
+    property bool large: false
+    x: 14
+    width: parent ? parent.width - 28 : 0
+    topPadding: 8
+    spacing: 13
+
+    SequentialAnimation on opacity {
+      running: skeleton.visible
+      loops: Animation.Infinite
+      NumberAnimation { from: 0.45; to: 1; duration: 700; easing.type: Easing.InOutSine }
+      NumberAnimation { from: 1; to: 0.45; duration: 700; easing.type: Easing.InOutSine }
+    }
+    Repeater {
+      model: skeleton.rows
+      delegate: Row {
+        required property int index
+        spacing: 12
+
+        Rectangle {
+          width: skeleton.large ? 56 : 40
+          height: width
+          radius: skeleton.large ? 10 : 8
+          color: root.white(0.07)
+        }
+        Column {
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: 7
+
+          Rectangle {
+            // Varied widths, like real titles.
+            width: (skeleton.width - 60) * [0.62, 0.48, 0.71, 0.55, 0.66, 0.5, 0.6, 0.44][index % 8]
+            height: 10
+            radius: 5
+            color: root.white(0.09)
+          }
+          Rectangle {
+            width: (skeleton.width - 60) * [0.3, 0.38, 0.26, 0.34, 0.28, 0.36, 0.24, 0.32][index % 8]
+            height: 8
+            radius: 4
+            color: root.white(0.05)
+          }
+        }
+      }
+    }
+  }
+
   component Note: Label {
     width: parent ? parent.width : 0
     topPadding: 22
@@ -1089,7 +1150,9 @@ Panel {
     }
     MultiEffect {
       anchors.fill: parent
-      visible: artImage.status === Image.Ready
+      opacity: artImage.status === Image.Ready ? 1 : 0
+      visible: opacity > 0
+      Behavior on opacity { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
       source: artImage
       maskEnabled: true
       maskSource: artMask
@@ -1454,6 +1517,17 @@ Panel {
           id: body
           width: scroller.width
 
+          // Tabs and pages fade in rather than snap.
+          NumberAnimation {
+            id: tabFade
+            target: body
+            property: "opacity"
+            from: 0.25
+            to: 1
+            duration: 200
+            easing.type: Easing.OutCubic
+          }
+
           Column {
             visible: root.status === "offline" || root.message !== ""
             width: parent.width
@@ -1546,9 +1620,13 @@ Panel {
                 }
               }
             }
+            Skeleton {
+              visible: root.page !== null && root.page.loading
+              rows: 6
+            }
             Note {
-              visible: root.page !== null && (root.page.loading || root.page.error !== "")
-              text: root.page ? (root.page.loading ? "Loading…" : root.page.error) : ""
+              visible: root.page !== null && !root.page.loading && root.page.error !== ""
+              text: root.page ? root.page.error : ""
             }
             Item { width: 1; height: 10 }
             Sections {
@@ -2146,9 +2224,13 @@ Panel {
                 }
               }
             }
+            Skeleton {
+              visible: root.searchActive && root.searching && root.searchSections.length === 0
+              topPadding: 18
+            }
             Note {
-              visible: root.searchActive && (root.searching || root.searchError !== "" || root.searchSections.length === 0)
-              text: root.searching ? "Searching…" : (root.searchError !== "" ? root.searchError : "No results for “" + root.searchQuery.trim() + "”")
+              visible: root.searchActive && !root.searching && (root.searchError !== "" || root.searchSections.length === 0)
+              text: root.searchError !== "" ? root.searchError : "No results for “" + root.searchQuery.trim() + "”"
             }
             Item { width: 1; height: 10 }
             Sections {
@@ -2156,6 +2238,8 @@ Panel {
               width: parent.width - 16
               visible: root.searchActive
               sections: root.searchSections
+              opacity: root.searching ? 0.45 : 1
+              Behavior on opacity { NumberAnimation { duration: 160 } }
             }
             Item { width: 1; height: 10 }
           }
@@ -2183,9 +2267,15 @@ Panel {
                 onClicked: root.setTab("settings")
               }
             }
+            Skeleton {
+              visible: root.player.loggedIn && root.libraryLoading && root.librarySections.length === 0
+              topPadding: 18
+              large: true
+              rows: 4
+            }
             Note {
-              visible: root.player.loggedIn && (root.libraryLoading || root.libraryError !== "")
-              text: root.libraryLoading ? "Loading…" : root.libraryError
+              visible: root.player.loggedIn && !root.libraryLoading && root.libraryError !== ""
+              text: root.libraryError
             }
             Item {
               visible: root.player.loggedIn
@@ -2221,9 +2311,15 @@ Panel {
             visible: root.page === null && root.tab === "home"
             width: parent.width
 
+            Skeleton {
+              visible: root.homeLoading && root.homeSections.length === 0
+              topPadding: 18
+              large: true
+              rows: 6
+            }
             Note {
-              visible: root.homeLoading || root.homeError !== ""
-              text: root.homeLoading ? "Loading…" : root.homeError
+              visible: !root.homeLoading && root.homeError !== ""
+              text: root.homeError
             }
             Item { width: 1; height: 10 }
             Sections {

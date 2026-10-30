@@ -1317,6 +1317,14 @@ def serve():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     server.daemon_threads = True
 
+    def warm_up():
+        # Fetch the home page now, so the popup's For you tab opens instantly.
+        try:
+            player.home([])
+        except Exception:
+            pass
+    threading.Thread(target=warm_up, daemon=True).start()
+
     def ticker():
         try:
             player.restore_session()
