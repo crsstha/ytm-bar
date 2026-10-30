@@ -130,8 +130,10 @@ Panel {
   readonly property var icons: ({
     search: "M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-3.5-3.5",
     settings: "M4 7h10M18 7h2M4 17h4M12 17h8M14 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M8 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
-    dislike: "M17 14V3M10 14l1 6a2 2 0 0 0 2 1l4-7h3V3H7a3 3 0 0 0-3 2.5L3 11a2 2 0 0 0 2 3h5z",
-    like: "M7 10v11M14 10l-1-6a2 2 0 0 0-2-1l-4 7H4v11h13a3 3 0 0 0 3-2.5l1-5.5a2 2 0 0 0-2-3h-5z",
+    // Like is a heart (filled once liked); dislike, a broken heart.
+    dislike: "M19.5 12.572l-7.5 7.428l-7.5-7.428a5 5 0 1 1 7.5-6.566a5 5 0 1 1 7.5 6.572M12 6l-2 4l4 3l-2 4v3",
+    like: "M19.5 12.572l-7.5 7.428l-7.5-7.428a5 5 0 1 1 7.5-6.566a5 5 0 1 1 7.5 6.572",
+    likeFill: "M19.5 12.572l-7.5 7.428l-7.5-7.428a5 5 0 1 1 7.5-6.566a5 5 0 1 1 7.5 6.572",
     shuffle: "M3 6h3l11 12h4M3 18h3l3-3.3M14 9.3L17 6h4M18 3l3 3-3 3M18 15l3 3-3 3",
     repeat: "M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4",
     repeatOne: "M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4M11 10.5l1.2-1V14.5",
@@ -1453,7 +1455,7 @@ Panel {
                   onClicked: root.action("dislike")
                 }
                 IconButton {
-                  icon: "like"
+                  icon: root.player.like === "LIKE" ? "likeFill" : "like"
                   iconColor: root.player.like === "LIKE" ? root.accent : root.white(0.55)
                   onClicked: root.action("like")
                 }
