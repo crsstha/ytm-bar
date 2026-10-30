@@ -21,7 +21,7 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("../bin/ytm-bar")).replace(/^file:\/\//, ""))
+  readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/ytm-bar")).replace(/^file:\/\//, ""))
   readonly property string api: "http://127.0.0.1:26539"
   readonly property int maxTitleLength: 30
 
