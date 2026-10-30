@@ -316,6 +316,32 @@ def profile_headers(profile):
     ])
 
 
+def cover_color(url):
+    """The cover's most vivid common colour, made light enough to read on the
+    dark card ("#rrggbb"), or "" without Pillow or the image."""
+    try:
+        import colorsys
+        import io
+        from PIL import Image
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            image = Image.open(io.BytesIO(resp.read())).convert("RGB")
+    except Exception:
+        return ""
+    image.thumbnail((48, 48))
+    best, best_score = None, -1.0
+    for count, (r, g, b) in image.quantize(8).convert("RGB").getcolors(64) or []:
+        h, l, s = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+        # Favour colour over grey, and plenty of pixels over a few.
+        score = count * (0.15 + s) * (0.3 + min(l, 1 - l))
+        if score > best_score:
+            best, best_score = (h, l, s), score
+    if best is None:
+        return ""
+    h, _, s = best
+    r, g, b = colorsys.hls_to_rgb(h, 0.74, max(0.35, min(0.8, s)) if s > 0.08 else 0.0)
+    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+
 def video_id_of(url):
     match = re.search(r"[?&]v=([\w-]{11})", url or "")
     return match.group(1) if match else None
@@ -439,6 +465,7 @@ class Player:
         self._account = (None, None)  # (auth, info)
         self._signin = None  # the sign-in window's process, while it's watched
         self._session = ""  # what session.json holds
+        self._colors = {}  # cover URL -> cover_color(), "" while it's worked out
         self.signin_error = ""
         try:
             saved = json.loads(STATE_FILE.read_text())
@@ -610,7 +637,21 @@ class Player:
             "songDuration": mpv.get("duration", 0) or track["duration"],
             "elapsedSeconds": mpv.get("time-pos", 0),
             "isPaused": mpv.get("pause", False),
+            "color": self.color_of(track["image"]),
         }
+
+    def color_of(self, url):
+        """The cover's colour; worked out in the background, "" until then."""
+        if not url:
+            return ""
+        with self.lock:
+            if url not in self._colors:
+                self._colors[url] = ""
+                if len(self._colors) > 200:
+                    self._colors.pop(next(iter(self._colors)))
+                threading.Thread(target=lambda: self._colors.__setitem__(url, cover_color(url)),
+                                 daemon=True).start()
+            return self._colors[url]
 
     def queue(self, args):
         playlist, _ = self.playlist()
