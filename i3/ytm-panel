@@ -9,7 +9,8 @@ bar. Click outside or press Esc to close it.
 One instance: running it again toggles the open window. Needs webkit2gtk-4.1
 and python-gobject.
 
-  YTM_PANEL_OFFSET  pixels between the top of the monitor and the popup (default 34)
+It opens under the bar on the monitor with the mouse (i3 reports where the
+bar ends), tinted by the playing song's cover.
 """
 
 import json
@@ -32,7 +33,8 @@ import gi  # noqa: E402
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("WebKit2", "4.1")
-from gi.repository import Gdk, Gio, GLib, Gtk, WebKit2  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, WebKit2  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 CLI = str(HERE.parent / "bin" / "ytm-bar")
@@ -40,8 +42,7 @@ API = f"http://127.0.0.1:{os.environ.get('YTM_BAR_PORT', '26539')}"
 HEADER = "X-Ytm-Bar"
 WIDTH = 420
 RADIUS = 22  # the card's corners (panel.html)
-EDGE_GAP = 8  # pixels between the popup and the monitor's right edge
-TOP_OFFSET = int(os.environ.get("YTM_PANEL_OFFSET", "34"))
+EDGE_GAP = 8  # pixels between the popup and the monitor's right edge and the bar
 SLOW = {"search", "home", "library", "open", "playall", "login", "account"}
 
 
@@ -72,6 +73,47 @@ def command(name, args):
     if status == 0:
         return {"ok": False, "error": "The player service isn't running"}
     return body or {"ok": False, "error": "The player service sent a bad reply"}
+
+
+def bar_bottom(geo):
+    """Where the bar ends on this monitor: i3's top dock area (polybar)."""
+    try:
+        tree = json.loads(subprocess.run(["i3-msg", "-t", "get_tree"], capture_output=True,
+                                         text=True, timeout=2).stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return geo.y + 28
+
+    def docks(node):
+        rect = node.get("rect", {})
+        if node.get("type") == "dockarea" and node.get("name") == "topdock" \
+                and geo.x <= rect.get("x", -1) < geo.x + geo.width:
+            yield rect["y"] + rect["height"]
+        for child in node.get("nodes", []):
+            yield from docks(child)
+    return max(docks(tree), default=geo.y)
+
+
+TINTS = {}  # cover URL -> its colour
+
+
+def tint(url):
+    """The cover's most vivid colour (of its average and its brightest
+    saturated pixels), for the card's glow."""
+    if url not in TINTS:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            loader = GdkPixbuf.PixbufLoader()
+            loader.write(resp.read())
+            loader.close()
+        image = loader.get_pixbuf().scale_simple(12, 12, GdkPixbuf.InterpType.BILINEAR)
+        data, n, stride = image.get_pixels(), image.get_n_channels(), image.get_rowstride()
+        pixels = [tuple(data[y * stride + x * n:y * stride + x * n + 3]) for y in range(12) for x in range(12)]
+
+        def vivid(rgb):
+            hi, lo = max(rgb), min(rgb)
+            return (hi - lo) * hi  # saturation times brightness
+        best = sorted(pixels, key=vivid)[-12:]
+        TINTS[url] = [sum(c[i] for c in best) // len(best) for i in range(3)]
+    return TINTS[url]
 
 
 def terminal(*argv):
@@ -133,7 +175,15 @@ class Panel(Gtk.ApplicationWindow):
             threading.Thread(target=self.answer, args=(msg["id"], cmd, args), daemon=True).start()
 
     def answer(self, id, cmd, args):
-        result = song() if cmd == "_song" else command(cmd, args)
+        if cmd == "_song":
+            result = song()
+        elif cmd == "_tint":
+            try:
+                result = {"ok": True, "rgb": tint(args[0])}
+            except Exception:
+                result = {"ok": False}
+        else:
+            result = command(cmd, args)
         GLib.idle_add(self.js, f"ytmReply({id}, {json.dumps(result)})")
 
     def on_load(self, view, event):
@@ -182,7 +232,7 @@ class Panel(Gtk.ApplicationWindow):
         display = Gdk.Display.get_default()
         _, x, y = display.get_default_seat().get_pointer().get_position()
         geo = display.get_monitor_at_point(x, y).get_geometry()
-        self.anchor = (geo.x + geo.width, geo.y + TOP_OFFSET)
+        self.anchor = (geo.x + geo.width, bar_bottom(geo) + EDGE_GAP)
         # Start the service if it's stopped (it saves and restores the queue).
         threading.Thread(target=subprocess.run, args=([CLI, "start"],),
                          kwargs={"capture_output": True}, daemon=True).start()

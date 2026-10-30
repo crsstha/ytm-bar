@@ -17,15 +17,26 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 svg { display: block; flex: none; }
 
 #card {
+  position: relative; isolation: isolate;
   width: 420px; max-height: 720px; display: flex; flex-direction: column; overflow: hidden;
   border-radius: var(--radius);
   /* The warm glow from the top-left corner over the tint. On i3 the window
      is opaque (i3/ytm-panel), so this is a solid dark card. */
-  background: radial-gradient(circle 190px at 130px 30px, rgba(233,170,90,.22), transparent),
+  background: radial-gradient(circle 190px at 130px 30px, var(--glow, rgba(233,170,90,.22)), transparent),
               rgba(18,20,24,.88);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
 }
 #scroll { overflow-y: auto; min-height: 0; flex: 1; }
+/* The playing song's cover, blurred into the card (Omarchy's panel can't). */
+#backdrop { position: absolute; inset: -60px; z-index: -1; background: center / cover no-repeat;
+  filter: blur(50px) saturate(1.5); opacity: 0; transition: opacity .8s; pointer-events: none; }
+#backdrop.on { opacity: .34; }
+#toast { position: absolute; left: 50%; bottom: 14px; transform: translate(-50%, 12px); max-width: 360px; z-index: 5;
+  padding: 9px 14px; border-radius: 12px; font-size: 12px; line-height: 1.35; color: #fff; pointer-events: none;
+  background: rgba(30,32,38,.96); box-shadow: 0 8px 28px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.1);
+  opacity: 0; transition: opacity .2s, transform .2s; }
+#toast.on { opacity: 1; transform: translate(-50%, 0); }
+#toast.warn { box-shadow: 0 8px 28px rgba(0,0,0,.45), inset 0 0 0 1px rgba(243,201,139,.5); }
 ::-webkit-scrollbar { width: 0; }  /* scroll with the wheel, like the QML Flickables */
 
 .mono { font-family: GeistMono, monospace; font-size: 11px; color: rgba(255,255,255,.5); }
@@ -96,9 +107,10 @@ body.dragging, body.dragging .row { cursor: grabbing; }
 .row.over::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; border-radius: 1px; background: var(--accent); }
 
 /* ---- Now. */
-.np { display: flex; align-items: center; gap: 14px; padding: 18px 18px 0; }
+.np { position: relative; display: flex; align-items: center; gap: 16px; padding: 18px 18px 0; }
+.np .art { box-shadow: 0 10px 30px rgba(0,0,0,.45); }
 .np .meta { flex: 1; min-width: 0; }
-.np .title { font-size: 17px; font-weight: 600; letter-spacing: -.17px; }
+.np .title { font-size: 18px; font-weight: 600; letter-spacing: -.2px; }
 .np .artist { color: rgba(255,255,255,.7); margin-top: 3px; }
 .np .album { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 3px; }
 .rating { display: flex; gap: 2px; }
@@ -133,8 +145,30 @@ body.dragging, body.dragging .row { cursor: grabbing; }
 .track .knob::after { content: ""; position: absolute; left: 4px; top: 4px; width: 12px; height: 12px; border-radius: 6px; background: #fff; }
 
 .queue { background: rgba(0,0,0,.18); border-top: 1px solid rgba(255,255,255,.07); padding: 14px 0 8px; }
-.queue .head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 18px 8px; }
-.queue .head .mono { color: rgba(255,255,255,.35); }
+.queue .head { display: flex; justify-content: space-between; align-items: center; padding: 0 12px 6px 18px; height: 28px; }
+.queue .head .mono { color: rgba(255,255,255,.35); margin-right: 6px; }
+.tools { display: flex; align-items: center; gap: 2px; }
+.tools .ib { width: 28px; height: 28px; border-radius: 8px; color: rgba(255,255,255,.45); }
+.tools .ib:hover { color: #fff; }
+.savebar { display: flex; gap: 6px; padding: 0 12px 10px 18px; }
+.savebar input, .field { flex: 1; height: 32px; padding: 0 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.12);
+  background: rgba(255,255,255,.06); color: #fff; font: 13px Geist, sans-serif; outline: none; caret-color: var(--accent); }
+/* Add to playlist. */
+.menu { position: absolute; right: 14px; top: 64px; z-index: 4; width: 250px; max-height: 300px; overflow-y: auto; padding: 6px;
+  border-radius: 14px; background: rgba(28,30,36,.98); box-shadow: 0 16px 40px rgba(0,0,0,.55), inset 0 0 0 1px rgba(255,255,255,.1); }
+.menu .sh { padding: 6px 8px 4px; }
+.menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border-radius: 8px; text-align: left; }
+.menu button:hover { background: rgba(255,255,255,.08); }
+.menu .t { font-size: 12.5px; font-weight: 500; }
+.menu .s { font-size: 11px; color: rgba(255,255,255,.45); }
+.menu .txt { min-width: 0; flex: 1; }
+.menu .note { padding: 14px 8px; }
+/* Recent searches. */
+.recent { padding: 16px 12px 18px; }
+.recent .hrow { display: flex; justify-content: space-between; align-items: center; padding: 0 6px 8px; }
+.recent .hrow button { font-size: 11px; color: rgba(255,255,255,.45); }
+.recent .hrow button:hover { color: #fff; }
+.recent .opts { padding: 0 6px; }
 .queue-list { padding: 0 8px; max-height: 265px; overflow-y: auto; }
 
 /* ---- Search. */
@@ -184,6 +218,13 @@ body.dragging, body.dragging .row { cursor: grabbing; }
 .badge { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex: none;
   background: rgba(0,0,0,.4); box-shadow: inset 0 0 0 1px rgba(255,255,255,.1); font: 12px GeistMono, monospace; color: var(--accent); }
 .account { display: flex; align-items: center; gap: 12px; }
+.devices { display: flex; flex-direction: column; gap: 4px; }
+.devices button { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; text-align: left;
+  font-size: 12.5px; color: rgba(255,255,255,.8); background: rgba(255,255,255,.03); box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
+.devices button:hover { background: rgba(255,255,255,.07); }
+.devices button.on { color: #fff; box-shadow: inset 0 0 0 1px var(--accent); }
+.devices .dot { width: 8px; height: 8px; border-radius: 4px; flex: none; background: rgba(255,255,255,.2); }
+.devices .on .dot { background: var(--accent); }
 .account .txt { flex: 1; min-width: 0; }
 .small { font-size: 12px; line-height: 1.45; color: rgba(255,255,255,.7); }
 .fine { font-size: 11px; color: rgba(255,255,255,.4); line-height: 1.4; }
@@ -196,6 +237,8 @@ textarea::placeholder { color: rgba(255,255,255,.38); font-family: Geist, sans-s
 </head>
 <body>
 <div id="card">
+  <div id="backdrop"></div>
+  <div id="toast"></div>
   <div id="header">
     <div id="segments"></div>
     <button class="ib" id="settings-btn" data-tab="settings"></button>
@@ -227,6 +270,9 @@ const ICONS = {
   up: "M12 19V5M6 11l6-6 6 6",
   close: "M6 6l12 12M18 6L6 18",
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  plus: "M12 5v14M5 12h14",
+  trash: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3",
+  save: "M5 3h11l3 3v15H5zM8 3v5h7V3M8 21v-7h8v7",
 }
 function icon(name, size = 16, stroke = 2) {
   const paint = name.endsWith("Fill") ? 'fill="currentColor"'
@@ -253,6 +299,10 @@ const S = {
   loginBusy: false, loginError: "", showHeaders: false, headers: "",
   pendingSeek: -1, pendingVolume: -1, elapsedBase: 0, elapsedAt: 0, elapsedHeld: false,
   drag: null, // {from, over, y} while a queue row is dragged
+  menu: false, playlists: null, playlistsError: "",  // the add-to-playlist menu
+  saving: false, saveName: "",  // saving the queue as a playlist
+  devices: [], failedSeen: null, tinted: "",
+  recent: (() => { try { return JSON.parse(localStorage.getItem("recent") || "[]") } catch (e) { return [] } })(),
 }
 const page = () => S.pages.length ? S.pages[S.pages.length - 1] : null
 const playing = () => S.status === "ok" && S.song && !S.song.isPaused
@@ -322,6 +372,10 @@ async function refreshPlayer() {
   if (!r.ok) return
   if (S.pendingVolume >= 0 && Math.abs(r.volume - S.pendingVolume) <= 1) S.pendingVolume = -1
   const wasSigningIn = S.player.signingIn
+  // A song YouTube wouldn't play (mpv skipped it): say so, once.
+  if (r.failed && S.failedSeen !== null && r.failed.at > S.failedSeen)
+    toast(`Skipped “${r.failed.title}” — YouTube wouldn't play it`, true)
+  S.failedSeen = r.failed ? r.failed.at : 0
   S.player = r
   S.playerAt = Date.now()
   if (wasSigningIn && !r.signingIn) {
@@ -330,15 +384,19 @@ async function refreshPlayer() {
   }
   render()
 }
-let settle = 0, pendingTimer = 0
+let settle = 0, pendingTimer = 0, toastTimer = 0
+function toast(text, warn) {
+  const el = document.getElementById("toast")
+  el.textContent = text
+  el.className = "on" + (warn ? " warn" : "")
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { el.className = warn ? "warn" : "" }, 3800)
+}
 async function action(name, args) {
   if (S.status !== "ok" && S.status !== "idle") return
-  if ((name === "like" || name === "dislike") && !S.player.loggedIn) {
-    S.message = "Log in (Settings) to like songs."
-    return render()
-  }
+  if ((name === "like" || name === "dislike") && !S.player.loggedIn) return toast("Log in (Settings) to like songs.", true)
   const r = await call(name, args)
-  S.message = r.ok ? "" : (r.error || "That didn't work")
+  if (!r.ok) toast(r.error || "That didn't work", true)
   render()
   clearTimeout(settle)
   settle = setTimeout(() => { poll(); refreshPlayer() }, 350)
@@ -365,7 +423,8 @@ function setTab(name) {
   scrollTop()
   if (name === "home" && !S.home.length) loadHome()
   if (name === "library" && !S.libraryLoaded) loadLibrary()
-  if (name === "settings") { loadAccount(); refreshPlayer() }
+  if (name === "settings") { loadAccount(); refreshPlayer(); loadDevices() }
+  S.menu = false
   render()
   if (name === "search") focusSearch()
 }
@@ -401,8 +460,20 @@ async function runSearch() {
   if (mine !== S.searchSeq) return  // a newer search is running
   S.searchedKey = key
   S.searchSections = r.ok ? r.sections : []
+  if (r.ok && r.sections.length) remember(S.query.trim())
   S.searchError = r.ok ? "" : (r.error || "Search failed")
   render()
+}
+function remember(query) {
+  S.recent = [query, ...S.recent.filter(q => q.toLowerCase() !== query.toLowerCase())].slice(0, 8)
+  try { localStorage.setItem("recent", JSON.stringify(S.recent)) } catch (e) {}
+}
+function searchFor(query) {
+  S.query = query
+  const q = document.getElementById("q")
+  if (q) q.value = query
+  clearTimeout(debounce)
+  runSearch()
 }
 function clearSearch() {
   Object.assign(S, { query: "", searchedKey: "", searchSections: [], searchError: "" })
@@ -446,6 +517,36 @@ async function login() {
   S.loginBusy = false
   if (r.ok) { S.headers = ""; reloadAccount() } else S.loginError = r.error || "Couldn't log in"
   render()
+}
+async function openMenu() {
+  if (!S.player.loggedIn) return toast("Log in (Settings) to use your playlists.", true)
+  S.menu = !S.menu
+  render()
+  if (S.menu && S.playlists === null) {
+    const r = await call("playlists")
+    S.playlists = r.ok ? r.playlists : []
+    S.playlistsError = r.ok ? "" : (r.error || "Couldn't load your playlists")
+    render()
+  }
+}
+async function addTo(id, title) {
+  S.menu = false
+  render()
+  const r = await call("addto", [id, S.song.videoId])
+  toast(r.ok ? `Added to “${title}”` : (r.error || "Couldn't add it"), !r.ok)
+}
+async function saveQueue() {
+  const name = S.saveName.trim()
+  if (!name) return
+  S.saving = false
+  render()
+  const r = await call("savequeue", [name])
+  toast(r.ok ? `Saved the queue as “${name}”` : (r.error || "Couldn't save it"), !r.ok)
+  if (r.ok) { S.playlists = null; S.library = []; S.libraryLoaded = false }
+}
+async function loadDevices() {
+  const r = await call("devices")
+  if (r.ok) { S.devices = r.devices; render() }
 }
 async function signin() {
   S.loginError = ""
@@ -505,7 +606,8 @@ function viewNow() {
       <div class="rating">
         <button class="ib${p.like === "DISLIKE" ? " on" : ""}" data-act="dislike">${icon("dislike")}</button>
         <button class="ib${p.like === "LIKE" ? " on" : ""}" data-act="like">${icon("like")}</button>
-      </div></div>
+        <button class="ib${S.menu ? " on" : ""}" data-menu title="Add to playlist">${icon("plus")}</button>
+      </div>${S.menu ? viewMenu() : ""}</div>
     <div class="progress">${track("progress", "grad")}
       <div class="times"><span class="mono" id="elapsed"></span>
         ${p.sleep ? `<button class="sleep" data-act="sleep" data-args='["off"]'>${icon("moon", 10, 2.4)}<span class="mono" id="sleep-left"></span><span class="mono x">✕</span></button>` : ""}
@@ -521,9 +623,22 @@ function viewNow() {
       <button class="ib${p.muted ? " on" : ""}" data-act="mute">${icon(p.muted ? "muted" : "volume", 15)}</button>
       ${track("volume")}<span class="mono" id="volume-text"></span></div>
     <div class="queue"><div class="head"><span class="sh">Up next</span>
-        <span class="mono">${p.queueCount} ${p.queueCount === 1 ? "track" : "tracks"}</span></div>
+        <span class="tools"><span class="mono">${p.queueCount} ${p.queueCount === 1 ? "track" : "tracks"}</span>
+          <button class="ib" data-act="shufflequeue" title="Shuffle up next">${icon("shuffle", 14)}</button>
+          <button class="ib" data-save title="Save as playlist">${icon("save", 14)}</button>
+          <button class="ib" data-act="clearqueue" title="Clear up next">${icon("trash", 14)}</button></span></div>
+      ${S.saving ? `<div class="savebar"><input id="savename" placeholder="Playlist name" spellcheck="false">
+        <button class="pill primary" data-savego>Save</button></div>` : ""}
       ${queue.length ? `<div class="queue-list" id="queue-list">${queue.map(e => row(e, null)).join("")}</div>` : note("Queue is empty")}
     </div>`
+}
+function viewMenu() {
+  const list = S.playlists
+  return `<div class="menu"><div class="sh">Add to playlist</div>` +
+    (list === null ? note("Loading…") : S.playlistsError ? note(S.playlistsError) : !list.length ? note("No playlists yet") :
+      list.map((pl, i) => `<button data-pl="${i}">${art(pl.image, pl.title, 32, "6px")}
+        <div class="txt"><div class="t ell">${esc(pl.title)}</div><div class="s ell">${esc(pl.subtitle)}</div></div></button>`).join("")) +
+    `</div>`
 }
 function viewPage(pg) {
   return `<div class="page">${art(pg.image, pg.title, 88, pg.type === "artist" ? "44px" : "14px")}
@@ -539,7 +654,10 @@ function viewSearch() {
     <div class="chips">${FILTERS.map(([v, l]) => `<button class="chip${S.filter === v ? " on" : ""}" data-filter="${v}">${l}</button>`).join("")}</div>
     ${searchActive() && (searching || S.searchError || !S.searchSections.length)
       ? note(searching ? "Searching…" : (S.searchError || `No results for “${S.query.trim()}”`)) : ""}
-    ${searchActive() ? sections(S.searchSections) : '<div style="height:20px"></div>'}`
+    ${searchActive() ? sections(S.searchSections) : S.recent.length ? `<div class="recent">
+      <div class="hrow"><span class="sh">Recent</span><button data-clearrecent>Clear</button></div>
+      <div class="opts">${S.recent.map((q, i) => `<button class="opt" data-recent="${i}">${esc(q)}</button>`).join("")}</div></div>`
+      : '<div style="height:20px"></div>'}`
 }
 function viewLibrary() {
   if (!S.player.loggedIn)
@@ -559,9 +677,16 @@ function viewSettings() {
     <div class="gap"></div><span class="sh">Equalizer</span>
     <div class="eq">${EQ.map(([v, l, gains]) => `<button class="${p.eq === v ? "on" : ""}" data-act="eq" data-args='["${v}"]'>
       <div class="bars">${gains.map(g => `<i style="height:${30 + g * 10}%"></i>`).join("")}</div><div class="lbl">${l}</div></button>`).join("")}</div>
-    <div class="gap"></div><span class="sh">Volume</span>
+    <div class="gap"></div><span class="sh">Playback</span>
+    <button class="card" data-act="normalize"><div class="txt"><div class="t">Even out volume</div>
+      <div class="s">Keeps loud and quiet songs at a similar level.</div></div><div class="switch${p.normalize ? " on" : ""}"></div></button>
     <button class="card" data-act="boost"><div class="txt"><div class="t">Volume boost</div>
       <div class="s">Allow up to 150%. May distort loud tracks.</div></div><div class="switch${p.boost ? " on" : ""}"></div></button>
+    <button class="card" data-act="notify"><div class="txt"><div class="t">Song notifications</div>
+      <div class="s">A notification with the cover when a song starts.</div></div><div class="switch${p.notify ? " on" : ""}"></div></button>
+    ${S.devices.length > 1 ? `<div class="gap"></div><span class="sh">Output</span>
+    <div class="devices">${S.devices.map((d, i) => `<button class="${d.name === p.device ? "on" : ""}" data-device="${i}">
+      <span class="dot"></span><span class="ell">${esc(d.name === "auto" ? "System default" : d.description)}</span></button>`).join("")}</div>` : ""}
     <div class="gap"></div><span class="sh">Interface</span>
     <button class="card" data-tui><div class="badge">&gt;_</div><div class="txt"><div class="t">Open in TUI</div>
       <div class="s">Keyboard-driven terminal view</div></div><span style="color:rgba(255,255,255,.4)">${icon("chevron", 14)}</span></button>
@@ -605,8 +730,8 @@ function render() {
   const pg = page()
   let html = ""
   if (S.status === "offline") html += `<div class="msg" style="color:rgba(255,255,255,.45)">The player isn't running. Click the bar widget to start it, or run: systemctl --user start ytm-bar</div>`
-  if (S.message) html += `<div class="msg">${esc(S.message)}</div>`
   html += pg ? viewPage(pg) : { now: viewNow, search: viewSearch, library: viewLibrary, home: viewHome, settings: viewSettings }[S.tab]()
+  backdrop()
   if (html !== lastHtml) {
     const focused = document.activeElement && document.activeElement.id
     const ql = document.getElementById("queue-list"), queueScroll = ql ? ql.scrollTop : 0
@@ -616,11 +741,26 @@ function render() {
     if (q) q.value = S.query
     const h = document.getElementById("headers")
     if (h) h.value = S.headers
+    const sn = document.getElementById("savename")
+    if (sn) { sn.value = S.saveName; if (focused !== "savename") sn.focus() }
     const nql = document.getElementById("queue-list")
     if (nql) nql.scrollTop = queueScroll
     if (focused && document.getElementById(focused)) document.getElementById(focused).focus()
   }
   tick()
+}
+// The cover blurred behind the card, and the glow in its colour.
+function backdrop() {
+  const src = S.song && S.status === "ok" ? S.song.imageSrc || "" : ""
+  if (src === S.tinted) return
+  S.tinted = src
+  const el = document.getElementById("backdrop"), card = document.getElementById("card")
+  el.classList.toggle("on", !!src)
+  if (src) el.style.backgroundImage = `url("${src.replace(/"/g, "%22")}")`
+  card.style.removeProperty("--glow")
+  if (src) post("_tint", [src]).then(r => {
+    if (r.ok && S.tinted === src) card.style.setProperty("--glow", `rgba(${r.rgb.join(",")},.32)`)
+  })
 }
 function setTrack(id, value, max, unity = 0) {
   const el = document.getElementById(id)
@@ -672,11 +812,23 @@ document.addEventListener("click", ev => {
   if ("headers" in d) { S.showHeaders = !S.showHeaders; return render() }
   if ("login" in d) return login()
   if ("logout" in d) return call("logout").then(() => { reloadAccount(); render() })
+  if ("menu" in d) return openMenu()
+  if (d.pl) { const pl = S.playlists[+d.pl]; return addTo(pl.id, pl.title) }
+  if ("save" in d) { S.saving = !S.saving; S.saveName = S.saveName || `Queue · ${new Date().toLocaleDateString()}`; return render() }
+  if ("savego" in d) return saveQueue()
+  if (d.recent) return searchFor(S.recent[+d.recent])
+  if ("clearrecent" in d) { S.recent = []; try { localStorage.removeItem("recent") } catch (e) {} return render() }
+  if (d.device) return action("device", [S.devices[+d.device].name])
   if (d.row) { const [e, ctx] = entries[+d.row]; activate(e, ctx) }
+})
+// A click outside the playlist menu closes it.
+document.addEventListener("mousedown", ev => {
+  if (S.menu && !ev.target.closest(".menu, [data-menu]")) { S.menu = false; render() }
 })
 let debounce = 0
 document.addEventListener("input", ev => {
   if (ev.target.id === "headers") S.headers = ev.target.value
+  if (ev.target.id === "savename") S.saveName = ev.target.value
   if (ev.target.id !== "q") return
   S.query = ev.target.value
   clearTimeout(debounce)
@@ -685,9 +837,11 @@ document.addEventListener("input", ev => {
 })
 document.addEventListener("keydown", ev => {
   if (ev.key === "Enter" && ev.target.id === "q") { clearTimeout(debounce); runSearch() }
+  if (ev.key === "Enter" && ev.target.id === "savename") saveQueue()
   if (ev.key !== "Escape") return
   ev.preventDefault()
-  if (ev.target.id === "q" && S.query) { ev.target.value = ""; clearSearch() }
+  if (S.menu || S.saving) { S.menu = S.saving = false; render() }
+  else if (ev.target.id === "q" && S.query) { ev.target.value = ""; clearSearch() }
   else if (S.pages.length) back()
   else host("close")
 })
@@ -754,7 +908,7 @@ window.ytmShown = tab => {
   poll(); refreshPlayer()
   if (S.tab === "search") focusSearch()
 }
-window.ytmHidden = () => { S.opened = false; S.message = ""; render() }
+window.ytmHidden = () => { S.opened = false; S.menu = S.saving = false; render() }
 
 // The window follows the card's height.
 new ResizeObserver(() => host("size", Math.ceil(document.getElementById("card").getBoundingClientRect().height)))
