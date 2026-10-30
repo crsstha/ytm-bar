@@ -22,7 +22,7 @@ user service.
 From the Omarchy plugin marketplace, or straight from GitHub:
 
 ```bash
-omarchy pkg add mpv yt-dlp python-ytmusicapi
+omarchy pkg add mpv yt-dlp python-ytmusicapi python-pillow
 omarchy plugin add https://github.com/crsstha/ytm-bar --enable
 ```
 
@@ -31,8 +31,8 @@ bar loads.
 
 **Dependencies** — required: `mpv`, `yt-dlp`, `python-ytmusicapi`. Optional:
 `mpv-mpris` (media keys), `python-pillow` (cover colours, cover art in the
-terminal), Chromium, Chrome or Brave (Sign in with Google). Omarchy ships all
-but `python-ytmusicapi`.
+terminal), Chromium, Chrome or Brave (Sign in with Google). Without
+`python-pillow` the card stays amber instead of taking the cover's colour.
 
 **Extras (optional)** — run `install.sh` from the plugin folder:
 
@@ -117,6 +117,11 @@ ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
   (`omarchy update`); YouTube changes break them for a few days at a time.
 - **No blur behind the popup** — run `install.sh` (it adds the blur rule), then
   `omarchy restart shell`. Updating from 1.0.0? Run it again: the rule changed.
+  Omarchy also turns blur off by default; to turn it on (for all see-through
+  windows, not just the card) add this to `~/.config/hypr/looknfeel.lua`:
+  `hl.config({ decoration = { blur = { enabled = true, size = 12, passes = 3 } } })`
+- **Card stays amber** — `python-pillow` is missing: `omarchy pkg add
+  python-pillow`, then `systemctl --user restart ytm-bar`.
 - **Edited the code?** `omarchy restart shell` for the QML,
   `systemctl --user restart ytm-bar` for `bin/ytm-bar`.
 

@@ -15,7 +15,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$REPO/manifest.json" | head -1)"
 BIN="$HOME/.local/bin"
 UNITS="$HOME/.config/systemd/user"
-PACKAGES=(mpv yt-dlp python-ytmusicapi mpv-mpris)
+PACKAGES=(mpv yt-dlp python-ytmusicapi mpv-mpris python-pillow)
 
 bindings=1
 for arg in "$@"; do
@@ -75,7 +75,7 @@ done
 if (( ${#missing[@]} )); then
   echo "    ! missing: ${missing[*]} — run: omarchy pkg add ${missing[*]}"
 else
-  echo "    mpv, yt-dlp, ytmusicapi and mpv-mpris are installed"
+  echo "    mpv, yt-dlp, ytmusicapi, mpv-mpris and pillow are installed"
 fi
 
 echo "--> Scripts"
