@@ -153,7 +153,8 @@ with tempfile.TemporaryDirectory() as home:
         assert cli("library")[1]["code"] == "unauthorized"
         assert cli("repeat") == (0, {"ok": True}) and cli("state")[1]["repeat"] == "ALL"
         assert cli("volume", "250") == (0, {"ok": True}) and cli("state")[1]["volume"] == 100
-        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False}
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False,
+                                                                                 "normalize": False, "notify": True, "device": "auto"}
 
         # Boost raises the limit to 150; turning it off brings the volume back to 100.
         assert cli("boost") == (0, {"ok": True})

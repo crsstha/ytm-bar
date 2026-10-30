@@ -26,6 +26,15 @@ browsing and radio, mpv + yt-dlp for the audio.
                           Pause after MINUTES of playing, or when this song ends.
   ytm-bar remove INDEX | playnext INDEX | move FROM TO
                           Edit the queue (INDEX as in "ytm-bar queue").
+  ytm-bar clearqueue | shufflequeue
+                          Drop or shuffle everything after the current song.
+  ytm-bar normalize | notify
+                          Toggle volume levelling / song notifications.
+  ytm-bar devices         The audio outputs; ytm-bar device NAME picks one.
+  ytm-bar playlists       Your playlists (needs login).
+  ytm-bar addto PLAYLIST_ID VIDEO_ID
+                          Add a song to one of your playlists.
+  ytm-bar savequeue TITLE Save the queue as a new playlist.
   ytm-bar jump INDEX      Play the queue item at INDEX.
   ytm-bar search QUERY [--filter all|songs|videos|albums|artists|playlists]
   ytm-bar home            Your YouTube Music home page, as sections.
@@ -117,10 +126,14 @@ USAGE = {
     "remove": "Usage: ytm-bar remove INDEX",
     "playnext": "Usage: ytm-bar playnext INDEX",
     "move": "Usage: ytm-bar move FROM TO",
+    "device": "Usage: ytm-bar device NAME",
+    "addto": "Usage: ytm-bar addto PLAYLIST_ID VIDEO_ID",
+    "savequeue": "Usage: ytm-bar savequeue TITLE",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
             "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout",
-            "mute", "boost", *USAGE}
+            "mute", "boost", "clearqueue", "shufflequeue", "normalize", "notify", "devices",
+            "playlists", *USAGE}
 
 # Equalizer presets: gains in dB for five bands, as in the design.
 EQ_BANDS = (60, 230, 910, 3600, 14000)
@@ -143,6 +156,22 @@ def eq_filter(name):
         return ""
     bands = [f"equalizer=f={f}:t=o:w=1.5:g={g}" for f, g in zip(EQ_BANDS, gains) if g]
     return "lavfi=[" + ",".join([f"volume={-max(0, *gains)}dB"] + bands) + "]"
+
+
+# Evens out loud and quiet songs (YouTube streams carry no ReplayGain).
+NORMALIZE_FILTER = "dynaudnorm=f=75:g=25:p=0.55"
+FADE_SECONDS = 10  # the sleep timer fades out over this long
+HISTORY_AFTER = 30  # seconds played before a song goes into your YouTube history
+ART_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ytm-bar/art"
+
+
+def audio_filter(eq, normalize):
+    """mpv's "af": the equalizer preset, then the volume levelling."""
+    eq = eq_filter(eq)
+    parts = [eq[len("lavfi=["):-1]] if eq else []
+    if normalize:
+        parts.append(NORMALIZE_FILTER)
+    return "lavfi=[" + ",".join(parts) + "]" if parts else ""
 
 
 class ApiError(Exception):
@@ -340,7 +369,8 @@ class Mpv:
         self.proc = subprocess.Popen([
             "mpv", "--idle=yes", "--no-video", "--no-terminal", "--audio-display=no",
             f"--input-ipc-server={MPV_SOCKET}", "--ytdl-format=bestaudio/best",
-            "--prefetch-playlist=yes", f"--volume={volume}", f"--volume-max={BOOST_MAX}",
+            "--prefetch-playlist=yes", "--gapless-audio=yes",
+            f"--volume={volume}", f"--volume-max={BOOST_MAX}",
             # Waits until YouTube makes the audio available (see bin/ytm-ytdl).
             f"--script-opts=ytdl_hook-ytdl_path={Path(__file__).resolve().parent / 'ytm-ytdl'}",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -436,6 +466,13 @@ class Player:
         self.eq = "flat"
         self.boost = False
         self.muted = False
+        self.normalize = False
+        self.notify = True
+        self.device = "auto"
+        self.failed = None  # {"title", "error", "at"}: the last song mpv couldn't play
+        self._notified = None  # the videoId last announced
+        self._history = None  # the videoId last added to the YouTube history
+        self._fading = False  # the sleep timer has lowered mpv's volume
         # Sleep timer: {"mode": "min", "left": seconds, "minutes": n} counts down
         # while playing; {"mode": "end"} pauses when the current song ends.
         self.sleep = None
@@ -451,6 +488,9 @@ class Player:
             self.volume = int(saved.get("volume", self.volume))
             self.eq = saved.get("eq") if saved.get("eq") in EQ_PRESETS else self.eq
             self.boost = bool(saved.get("boost", False))
+            self.normalize = bool(saved.get("normalize", False))
+            self.notify = bool(saved.get("notify", True))
+            self.device = str(saved.get("device") or "auto")
         except (OSError, ValueError, AttributeError):
             pass
         self.volume = min(self.volume, self.max_volume)
@@ -462,7 +502,9 @@ class Player:
     def save(self):
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost}))
+            STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost,
+                                              "normalize": self.normalize, "notify": self.notify,
+                                              "device": self.device}))
         except OSError:
             pass
 
@@ -519,8 +561,9 @@ class Player:
                 self.mpv = Mpv(self.volume, self.on_event)
                 self.mpv.command("observe_property", 1, "playlist-pos")
                 self.apply_repeat()
-                self.mpv.set("af", eq_filter(self.eq))
+                self.mpv.set("af", audio_filter(self.eq, self.normalize))
                 self.mpv.set("mute", self.muted)
+                self.mpv.set("audio-device", self.device)
             return self.mpv
 
     def on_event(self, message):
@@ -534,10 +577,14 @@ class Player:
                 self.song_changed(message.get("data"))
             elif event == "file-loaded" and self.mpv:
                 self.song_changed(self.mpv.get("playlist-pos", -1))
+                self.announce()
+            elif event == "end-file" and message.get("reason") == "error":
+                self.song_failed(message)
             elif event == "end-file" and message.get("reason") == "eof" and self.sleep and self.sleep["mode"] == "end":
                 # Sleep timer "end of song": the next song loads paused.
                 self.sleep = None
                 self.mpv.set("pause", True)
+                self.mpv.set("volume", self.volume)  # after the fade-out
         except Exception:  # runs in its own thread: log it (journalctl --user -u ytm-bar)
             traceback.print_exc()
 
@@ -566,7 +613,7 @@ class Player:
         """Like YouTube Music's autoplay: when the queue runs low, append the
         radio for the current song."""
         with self.lock:
-            if video_id in self.radio_seeds or self.repeat != "NONE":
+            if video_id in self.radio_seeds or self.repeat == "ONE":
                 return
             self.radio_seeds.add(video_id)
         try:
@@ -588,6 +635,60 @@ class Player:
                 track = track_of(item)
                 track["like"] = track["like"] or "INDIFFERENT"
                 self.tracks[video_id] = {**self.tracks.get(video_id, {}), **{k: v for k, v in track.items() if v}}
+
+    # -- Notifications, failures and history.
+
+    def art_file(self, track):
+        """The cover as a local file for notify-send, cached by videoId."""
+        if not track.get("image"):
+            return ""
+        path = ART_CACHE / f"{track['videoId']}.jpg"
+        if not path.exists():
+            try:
+                ART_CACHE.mkdir(parents=True, exist_ok=True)
+                with urllib.request.urlopen(track["image"], timeout=5) as resp:
+                    path.write_bytes(resp.read())
+            except (OSError, ValueError):
+                return ""
+        return str(path)
+
+    def notify_send(self, title, body, track=None):
+        if not shutil.which("notify-send"):
+            return
+        def send():
+            icon = self.art_file(track) if track else ""
+            # The stack tag makes dunst replace the last notification instead of piling up.
+            subprocess.run(["notify-send", "-a", "YouTube Music", "-i", icon or "audio-x-generic",
+                            "-h", "string:x-dunst-stack-tag:ytm-bar", title, body],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        threading.Thread(target=send, daemon=True).start()
+
+    def announce(self):
+        """A notification for each new song that starts playing."""
+        track, mpv = self.current()
+        if not self.notify or track is None or mpv.get("pause", False) or track["videoId"] == self._notified:
+            return
+        self._notified = track["videoId"]
+        self.notify_send(track["title"], joined(track["artist"], track["album"]), track)
+
+    def song_failed(self, message):
+        """mpv gave up on a song (YouTube refused it) and moves on: say so."""
+        entry = message.get("playlist_entry_id")
+        playlist, _ = self.playlist()
+        item = next((i for i in playlist if i.get("id") == entry), {})
+        video_id = video_id_of(item.get("filename"))
+        title = (self.tracks.get(video_id) or {}).get("title") or item.get("title") or "A song"
+        self.failed = {"title": title, "error": message.get("file_error") or "unknown error", "at": time.time()}
+        if self.notify:
+            self.notify_send("Skipped a song", f"YouTube wouldn't play “{title}”")
+
+    def add_history(self, video_id):
+        """Like listening on YouTube Music: the song goes into your history, so
+        your home page and radio keep learning."""
+        try:
+            self.call("add_history_item", self.call("get_song", video_id))
+        except ApiError:
+            traceback.print_exc()
 
     # -- What the panel reads.
 
@@ -650,6 +751,10 @@ class Player:
             "loggedIn": self.logged_in,
             "signingIn": self.signing_in,
             "signinError": self.signin_error,
+            "normalize": self.normalize,
+            "notify": self.notify,
+            "device": self.device,
+            "failed": self.failed,
             **self.queue(args),
         }
 
@@ -928,14 +1033,33 @@ class Player:
         """Shuffle what's left of the queue (turning it off keeps the order)."""
         with self.lock:
             self.shuffle = not self.shuffle
+            if self.shuffle:
+                self.shufflequeue(args)
+
+    def shufflequeue(self, args):
+        """Shuffle the songs after the current one, once."""
+        with self.lock:
             playlist, mpv = self.playlist()
-            if not self.shuffle or not mpv:
+            if not mpv:
                 return
             start = self.current_index(playlist) + 1
             for target in range(start, len(playlist) - 1):
                 source = random.randint(target, len(playlist) - 1)
                 if source != target:
                     mpv.command("playlist-move", source, target)
+
+    def clearqueue(self, args):
+        """Drop everything after the current song; its radio refills the queue."""
+        playlist, mpv = self.playlist()
+        if not mpv:
+            return
+        for index in range(len(playlist) - 1, self.current_index(playlist), -1):
+            mpv.command("playlist-remove", index)
+        with self.lock:
+            self.radio_seeds.clear()
+        track, _ = self.current()
+        if track:
+            self.extend_radio(track["videoId"], self.playlist()[0])
 
     def apply_repeat(self):
         if self.mpv:
@@ -978,13 +1102,47 @@ class Player:
         if name not in EQ_PRESETS:
             raise ApiError("failed", USAGE["eq"])
         self.eq = name
+        self.apply_filter()
+
+    def apply_filter(self):
         mpv = self.player(start=False)
         if mpv:
-            mpv.set("af", eq_filter(name))
+            mpv.set("af", audio_filter(self.eq, self.normalize))
+        self.save()
+
+    def normalize_(self, args):
+        self.normalize = not self.normalize
+        self.apply_filter()
+
+    def notify_(self, args):
+        self.notify = not self.notify
+        self.save()
+
+    def devices(self, args):
+        """The outputs worth choosing: the system default and the sound
+        server's own (PipeWire, else PulseAudio), not every raw ALSA plugin."""
+        devices = self.player().get("audio-device-list", [])
+        for server in ("pipewire/", "pulse/"):
+            outputs = [d for d in devices if d.get("name", "").startswith(server)]
+            if outputs:
+                break
+        chosen = [d for d in devices if d.get("name") == "auto"] + outputs
+        return {"devices": [{"name": d["name"], "description": d.get("description") or d["name"]} for d in chosen],
+                "device": self.device}
+
+    def device_(self, args):
+        names = [d["name"] for d in self.devices([])["devices"]]
+        if not args or args[0] not in names:
+            raise ApiError("failed", "That audio output isn't available")
+        self.device = args[0]
+        self.player().set("audio-device", self.device)
         self.save()
 
     def sleep_(self, args):
         value = args[0].lower() if args else ""
+        mpv = self.player(start=False)
+        if mpv:
+            mpv.set("volume", self.volume)  # undo a fade-out in progress
         if value == "off":
             self.sleep = None
         elif value == "end":
@@ -999,17 +1157,33 @@ class Player:
             self.sleep = {"mode": "min", "left": minutes * 60, "minutes": minutes}
 
     def tick(self):
-        """Once a second: run down a minutes sleep timer while music plays."""
-        sleep = self.sleep
-        if not sleep or sleep["mode"] != "min":
-            return
+        """Once a second while music plays: run down the sleep timer (fading
+        out over its last seconds) and add the song to your history."""
         track, mpv = self.current()
         if track is None or mpv.get("pause", False):
             return
-        sleep["left"] -= 1
-        if sleep["left"] <= 0:
+        position = mpv.get("time-pos", 0) or 0
+        if self.logged_in and position >= HISTORY_AFTER and self._history != track["videoId"]:
+            self._history = track["videoId"]
+            threading.Thread(target=self.add_history, args=(track["videoId"],), daemon=True).start()
+        sleep = self.sleep
+        if not sleep:
+            return
+        if sleep["mode"] == "min":
+            sleep["left"] -= 1
+            left = sleep["left"]
+        else:  # "end": pauses on end-file
+            left = (mpv.get("duration", 0) or 0) - position
+        if sleep["mode"] == "min" and left <= 0:
             self.sleep = None
             mpv.set("pause", True)
+            mpv.set("volume", self.volume)
+        elif 0 < left <= FADE_SECONDS:
+            self._fading = True
+            mpv.set("volume", round(self.volume * left / FADE_SECONDS))
+        elif self._fading:  # skipped to another song mid-fade
+            self._fading = False
+            mpv.set("volume", self.volume)
 
     # -- Resuming where you left off.
 
@@ -1070,6 +1244,40 @@ class Player:
                 mpv.command("loadfile", WATCH_URL + video_id, "append", -1, options)
             mpv.set("playlist-pos", index)
         self._session = ""
+
+    # -- Your playlists.
+
+    def playlists(self, args):
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to use your playlists")
+        items = self.call("get_library_playlists", limit=100)
+        # Only playlists you can add to: not "Liked Music" or the auto-made ones.
+        return {"playlists": [{"id": p["playlistId"], "title": p.get("title", ""),
+                               "subtitle": p.get("count") or "", "image": image_of(p, 120)}
+                              for p in items if p.get("playlistId") and p["playlistId"] not in ("LM", "SE")]}
+
+    def addto(self, args):
+        if len(args) < 2:
+            raise ApiError("failed", USAGE["addto"])
+        result = self.call("add_playlist_items", args[0], [args[1]], duplicates=False)
+        if isinstance(result, dict) and result.get("status") not in (None, "STATUS_SUCCEEDED"):
+            raise ApiError("failed", "That song is already in the playlist")
+        return {}
+
+    def savequeue(self, args):
+        title = " ".join(args).strip()
+        if not title:
+            raise ApiError("failed", USAGE["savequeue"])
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to save playlists")
+        playlist, _ = self.playlist()
+        ids = [v for v in (video_id_of(i.get("filename")) for i in playlist[max(0, self.current_index(playlist)):]) if v]
+        if not ids:
+            raise ApiError("failed", "The queue is empty")
+        playlist_id = self.call("create_playlist", title, "Saved from ytm-bar", video_ids=ids)
+        if not isinstance(playlist_id, str):
+            raise ApiError("failed", "YouTube Music didn't create the playlist")
+        return {"playlistId": playlist_id}
 
     # -- Editing the queue (indexes are mpv playlist positions).
 
@@ -1303,7 +1511,8 @@ def run(command, args):
         raise ApiError("failed", USAGE[command])
     elif command == "login":
         args = [read_headers()]
-    slow = command in ("search", "home", "library", "open", "playall", "login", "account")
+    slow = command in ("search", "home", "library", "open", "playall", "login", "account",
+                       "playlists", "addto", "savequeue", "clearqueue")
     if command == "signin":
         result = request("POST", "/signin", {"args": []}, timeout=10)
         if not result.get("ok"):
