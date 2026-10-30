@@ -80,6 +80,7 @@ SESSION_EVERY = 5  # seconds between saves while something is loaded
 SESSION_LIMIT = 200  # songs kept
 MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock"
 SERVICE = "ytm-bar.service"
+PKG_ADD = "omarchy pkg add" if shutil.which("omarchy") else "sudo pacman -S"
 WATCH_URL = "https://music.youtube.com/watch?v="
 QUEUE_LIMIT = 10
 RADIO_LIMIT = 25
@@ -475,7 +476,7 @@ class Player:
             try:
                 from ytmusicapi import YTMusic
             except ImportError:
-                raise ApiError("failed", "ytmusicapi isn't installed — run: omarchy pkg add python-ytmusicapi")
+                raise ApiError("failed", f"ytmusicapi isn't installed — run: {PKG_ADD} python-ytmusicapi")
             try:
                 self._yt = YTMusic(str(AUTH_FILE)) if auth else YTMusic()
             except Exception as e:
@@ -794,7 +795,7 @@ class Player:
             auth = setup(headers_raw=headers)
             info = YTMusic(auth).get_account_info()
         except ImportError:
-            raise ApiError("failed", "ytmusicapi isn't installed — run: omarchy pkg add python-ytmusicapi")
+            raise ApiError("failed", f"ytmusicapi isn't installed — run: {PKG_ADD} python-ytmusicapi")
         except Exception as e:
             raise ApiError("unauthorized", f"Those headers didn't work: {e}")
         CONFIG.mkdir(parents=True, exist_ok=True)
@@ -825,7 +826,7 @@ class Player:
                 return {"signingIn": True}
             browser = next((b for b in SIGNIN_BROWSERS if shutil.which(b)), None)
             if not browser:
-                raise ApiError("failed", "Signing in needs Chromium — run: omarchy pkg add chromium")
+                raise ApiError("failed", f"Signing in needs Chromium — run: {PKG_ADD} chromium")
             SIGNIN_PROFILE.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.signin_error = ""
             self._signin = subprocess.Popen([
