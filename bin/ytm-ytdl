@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""yt-dlp for mpv's ytdl_hook: bin/ytm-bar starts mpv with this as its
+ytdl_path. YouTube gives each format a time it becomes available (yt-dlp's
+"available_at") and answers 403 until then. mpv 0.41 asks at once, gets the
+403 and skips the song; mpv master waits (mpv PR #18193). This waits too,
+then hands yt-dlp's JSON to mpv. Drop it once mpv 0.42 is out."""
+
+import json
+import subprocess
+import sys
+import time
+
+MAX_WAIT = 30  # seconds; never hold a song longer than this
+
+out = subprocess.run(["yt-dlp", *sys.argv[1:]], stdout=subprocess.PIPE)
+try:
+    info = json.loads(out.stdout)
+    times = [info.get("available_at") or 0]
+    times += [f.get("available_at") or 0 for f in info.get("requested_formats") or []]
+    time.sleep(min(MAX_WAIT, max(0, max(times) - time.time())))
+except (ValueError, AttributeError):
+    pass  # not JSON (an error, --version): pass it on as is
+sys.stdout.buffer.write(out.stdout)
+sys.exit(out.returncode)
