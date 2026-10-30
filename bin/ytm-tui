@@ -531,7 +531,15 @@ class App:
         c.put(y, gx, ICON["settings"], WHITE if on else white(0.6), bg=white(0.16) if on else None)
         c.click(y, gx - 1, gx + 2, lambda: self.set_tab("settings"))
 
-    def draw_art(self, c, y, x, cols, rows, url, seed):
+    def draw_art(self, c, y, x, cols, rows, url, seed, liked=False):
+        if liked:  # Liked Music: a heart on the accent, as in the popup
+            for r in range(rows):
+                t = r / max(1, rows - 1)
+                color = tuple(round(a * (1 - 0.6 * t)) for a in ACCENT)
+                c.put(y + r, x, " " * cols, color, bg=color)
+            c.put(y + (rows - 1) // 2, x + (cols - 1) // 2, ICON["like"], WHITE,
+                  bg=tuple(round(a * (1 - 0.6 * ((rows - 1) // 2) / max(1, rows - 1))) for a in ACCENT))
+            return
         pixels = self.art.get(url, cols, rows)
         if pixels:
             for r, line in enumerate(pixels):
@@ -722,7 +730,7 @@ class App:
 
     def draw_page(self, c, y, x, width, bottom):
         page = self.pages[-1]
-        self.draw_art(c, y, x, 12, 6, page.get("image"), page.get("title"))
+        self.draw_art(c, y, x, 12, 6, page.get("image"), page.get("title"), page.get("liked"))
         tx, tw = x + 14, width - 14
         c.put(y + 1, tx, clip(page.get("title", ""), tw), WHITE, bold=True)
         c.put(y + 2, tx, clip(page.get("subtitle", ""), tw), white(0.45))
@@ -790,7 +798,7 @@ class App:
             if top <= y + r < bottom and bg:
                 c.fill(y + r, x - 1, width + 2, bg)
         if y >= top and y + 1 < bottom:
-            self.draw_art(c, y, x, 4, 2, item.get("image"), item.get("title"))
+            self.draw_art(c, y, x, 4, 2, item.get("image"), item.get("title"), item.get("liked"))
         tw = width - 6 - 8
         if top <= y < bottom:
             c.put(y, x + 6, clip(item.get("title", ""), tw), ACCENT if current else white(0.92), bold=selected)

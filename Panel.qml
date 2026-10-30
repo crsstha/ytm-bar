@@ -39,6 +39,11 @@ Panel {
   property bool queueAsList: false
   // Memory in use (ytm-bar stats), refreshed while Settings is open.
   property var stats: null
+  // Your playlists, for "Add to playlist" (Playing) and "New playlist" (Saved).
+  property bool addToOpen: false
+  property bool playlistsLoading: false
+  property var playlists: []
+  property bool newPlaylistOpen: false
   readonly property int cardRadius: 22
   readonly property int queueRows: 5
   readonly property string sansFont: geist.status === FontLoader.Ready ? geist.name : root.bar.fontFamily
@@ -146,6 +151,7 @@ Panel {
     volume: "M11 5L6 9H3v6h3l5 4zM15.5 9a4 4 0 0 1 0 6",
     muted: "M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5",
     chevron: "M9 6l6 6-6 6",
+    playlistAdd: "M19 8h-14M5 12h9M11 16h-6M15 16h6M18 13v6",
     list: "M9 6h11M9 12h11M9 18h11M5 6v.01M5 12v.01M5 18v.01",
     grid: "M4 4h6v6h-6zM14 4h6v6h-6zM4 14h6v6h-6zM14 14h6v6h-6z",
     back: "M15 6l-6 6 6 6",
@@ -496,6 +502,48 @@ Panel {
     })
   }
 
+  function loadPlaylists() {
+    root.playlistsLoading = true
+    root.call("playlists", [], function(result) {
+      root.playlistsLoading = false
+      root.playlists = result.ok ? result.playlists : []
+      if (!result.ok) root.message = result.error || "Couldn't load your playlists"
+    })
+  }
+
+  function toggleAddTo() {
+    if (!root.player.loggedIn) {
+      root.message = "Log in (Settings) to use your playlists."
+      return
+    }
+    root.addToOpen = !root.addToOpen
+    if (root.addToOpen) root.loadPlaylists()
+  }
+
+  function addTo(playlist) {
+    if (!root.song) return
+    root.call("addto", [playlist.id, root.song.videoId], function(result) {
+      root.message = result.ok ? "Added to " + playlist.title : (result.error || "Couldn't add it")
+      if (result.ok) root.addToOpen = false
+    })
+  }
+
+  // A new private playlist, with the current song in it when `withSong`.
+  function createPlaylist(title, withSong, done) {
+    var args = [title]
+    if (withSong && root.song) args.push(root.song.videoId)
+    root.call("newplaylist", args, function(result) {
+      root.message = result.ok ? (withSong ? "Added to " : "Made ") + result.title : (result.error || "Couldn't make the playlist")
+      if (result.ok) {
+        root.addToOpen = false
+        root.newPlaylistOpen = false
+        root.libraryLoaded = false
+        if (root.tab === "library") root.loadLibrary()
+      }
+      if (done) done(result.ok)
+    })
+  }
+
   function loadStats() {
     root.call("stats", [], function(result) { if (result.ok) root.stats = result })
   }
@@ -669,6 +717,46 @@ Panel {
         capStyle: ShapePath.RoundCap
         joinStyle: ShapePath.RoundJoin
         PathSvg { path: root.icons[icon.name] || "" }
+      }
+    }
+  }
+
+  // Naming a new playlist: a field and a Create button.
+  component NewPlaylistField: Row {
+    id: newField
+    property bool withSong: false
+    spacing: 8
+
+    TextField {
+      id: nameField
+      width: newField.width - createPill.width - newField.spacing
+      height: 32
+      leftPadding: 12
+      rightPadding: 12
+      placeholderText: newField.withSong ? "New playlist with this song" : "New playlist name"
+      placeholderTextColor: root.white(0.38)
+      color: "#ffffff"
+      foreground: "#ffffff"
+      accent: root.accent
+      font.family: root.sansFont
+      font.pixelSize: 12
+      background: Rectangle {
+        radius: 10
+        color: root.white(0.06)
+        border.width: 1
+        border.color: nameField.activeFocus ? root.white(0.18) : root.white(0.08)
+      }
+      onAccepted: createPill.clicked()
+      // Saved's field opens empty and ready to type in.
+      onVisibleChanged: if (visible && !newField.withSong) forceActiveFocus()
+    }
+    Pill {
+      id: createPill
+      text: "Create"
+      primary: nameField.text.trim() !== ""
+      onClicked: {
+        if (nameField.text.trim() === "") return
+        root.createPlaylist(nameField.text.trim(), newField.withSong, function(ok) { if (ok) nameField.text = "" })
       }
     }
   }
@@ -931,6 +1019,8 @@ Panel {
     property string source: ""
     property string seed: ""
     property real radius: 8
+    // Liked Music: a heart on the accent instead of YouTube's thumbs-up art.
+    property bool liked: false
     readonly property real hue: root.hueOf(seed)
 
     Rectangle {
@@ -949,7 +1039,24 @@ Panel {
       asynchronous: true
       sourceSize.width: art.width * 2
       sourceSize.height: art.height * 2
-      source: art.source
+      source: art.liked ? "" : art.source
+    }
+    Rectangle {
+      visible: art.liked
+      anchors.fill: parent
+      radius: art.radius
+      gradient: Gradient {
+        orientation: Gradient.Vertical
+        GradientStop { position: 0; color: Qt.lighter(root.accent, 1.05) }
+        GradientStop { position: 1; color: Qt.darker(root.accent, 2.4) }
+      }
+
+      Icon {
+        anchors.centerIn: parent
+        name: "likeFill"
+        size: parent.width * 0.42
+        color: "#ffffff"
+      }
     }
     Item {
       id: artMask
@@ -1051,6 +1158,7 @@ Panel {
       radius: row.modelData.type === "artist" ? width / 2 : (row.large ? 10 : 8)
       source: row.modelData.image || ""
       seed: row.modelData.title
+      liked: row.modelData.liked === true
     }
     Column {
       anchors.left: rowArt.right
@@ -1367,6 +1475,7 @@ Panel {
                 radius: root.page && root.page.type === "artist" ? 44 : 14
                 source: root.page ? root.page.image || "" : ""
                 seed: root.page ? root.page.title : ""
+                liked: root.page !== null && root.page.liked === true
               }
               Column {
                 width: parent.width - pageArt.width - parent.spacing
@@ -1481,6 +1590,14 @@ Panel {
                 spacing: 2
 
                 IconButton {
+                  icon: "playlistAdd"
+                  tip: "Add to playlist"
+                  iconColor: root.addToOpen ? "#ffffff" : root.white(0.55)
+                  color: root.addToOpen ? root.white(0.12) : (addToHover.hovered ? root.white(0.08) : "transparent")
+                  HoverHandler { id: addToHover }
+                  onClicked: root.toggleAddTo()
+                }
+                IconButton {
                   icon: "dislike"
                   tip: root.player.like === "DISLIKE" ? "Disliked" : "Dislike and skip"
                   iconColor: root.player.like === "DISLIKE" ? root.accent : root.white(0.55)
@@ -1491,6 +1608,95 @@ Panel {
                   tip: root.player.like === "LIKE" ? "Liked — click to undo" : "Like"
                   iconColor: root.player.like === "LIKE" ? root.accent : root.white(0.55)
                   onClicked: root.action("like")
+                }
+              }
+            }
+
+            // Add to playlist: your playlists, or a new one with this song.
+            Column {
+              visible: root.addToOpen
+              x: 18
+              width: parent.width - 36
+              topPadding: 14
+              spacing: 6
+
+              Rectangle {
+                width: parent.width
+                height: addToColumn.implicitHeight + 16
+                radius: 12
+                color: root.white(0.04)
+                border.width: 1
+                border.color: root.white(0.08)
+
+                Column {
+                  id: addToColumn
+                  x: 8
+                  y: 8
+                  width: parent.width - 16
+                  spacing: 2
+
+                  Label {
+                    leftPadding: 4
+                    bottomPadding: 4
+                    text: root.playlistsLoading ? "Loading your playlists…"
+                      : (root.playlists.length ? "Add to playlist" : "No playlists yet — make one:")
+                    font.pixelSize: 11
+                    weight: Font.DemiBold
+                    color: root.white(0.45)
+                  }
+                  Flickable {
+                    width: parent.width
+                    height: Math.min(playlistColumn.implicitHeight, 4 * 34)
+                    contentHeight: playlistColumn.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+
+                    Column {
+                      id: playlistColumn
+                      width: parent.width
+
+                      Repeater {
+                        model: root.playlists
+                        delegate: Rectangle {
+                          id: playlistRow
+                          required property var modelData
+                          width: playlistColumn.width
+                          height: 34
+                          radius: 8
+                          color: playlistArea.containsMouse ? root.white(0.08) : "transparent"
+
+                          Art {
+                            x: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 26
+                            height: 26
+                            radius: 6
+                            source: playlistRow.modelData.image || ""
+                            seed: playlistRow.modelData.title
+                          }
+                          Label {
+                            x: 40
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - 48
+                            text: playlistRow.modelData.title
+                            font.pixelSize: 13
+                          }
+                          MouseArea {
+                            id: playlistArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.addTo(playlistRow.modelData)
+                          }
+                        }
+                      }
+                    }
+                  }
+                  Item { width: 1; height: 4 }
+                  NewPlaylistField {
+                    width: parent.width
+                    withSong: true
+                  }
                 }
               }
             }
@@ -1950,6 +2156,25 @@ Panel {
             Note {
               visible: root.player.loggedIn && (root.libraryLoading || root.libraryError !== "")
               text: root.libraryLoading ? "Loading…" : root.libraryError
+            }
+            Item {
+              visible: root.player.loggedIn
+              x: 18
+              width: parent.width - 36
+              height: 14 + 32
+
+              Pill {
+                visible: !root.newPlaylistOpen
+                y: 14
+                text: "New playlist"
+                icon: "playlistAdd"
+                onClicked: root.newPlaylistOpen = true
+              }
+              NewPlaylistField {
+                visible: root.newPlaylistOpen
+                y: 14
+                width: parent.width
+              }
             }
             Item { width: 1; height: 10 }
             Sections {

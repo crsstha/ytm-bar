@@ -29,6 +29,11 @@ browsing and radio, mpv + yt-dlp for the audio.
   ytm-bar search QUERY [--filter all|songs|videos|albums|artists|playlists]
   ytm-bar home            Your YouTube Music home page, as sections.
   ytm-bar library         Your playlists, albums and artists (needs login).
+  ytm-bar playlists       The playlists you can add songs to (needs login).
+  ytm-bar newplaylist TITLE [VIDEO_ID]
+                          Make a private playlist, optionally with a first song.
+  ytm-bar addto PLAYLIST_ID VIDEO_ID
+                          Add a song to one of your playlists.
   ytm-bar open TYPE ID    An album, artist or playlist, as sections.
   ytm-bar play VIDEO_ID   Play a song now, followed by its radio.
   ytm-bar add VIDEO_ID    Queue a song to play next.
@@ -114,9 +119,12 @@ USAGE = {
     "remove": "Usage: ytm-bar remove INDEX",
     "playnext": "Usage: ytm-bar playnext INDEX",
     "move": "Usage: ytm-bar move FROM TO",
+    "newplaylist": "Usage: ytm-bar newplaylist TITLE [VIDEO_ID]",
+    "addto": "Usage: ytm-bar addto PLAYLIST_ID VIDEO_ID",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
             "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout", "stats",
+            "playlists",
             "mute", "boost", *USAGE}
 
 # Equalizer presets: gains in dB for five bands, as in the design.
@@ -738,12 +746,40 @@ class Player:
         sections = [{"title": title, "items": rows} for title, items in shelves if (rows := entries_of(items))]
         # Liked Music (playlist "LM") isn't always among the library playlists; put it first.
         liked = {"type": "playlist", "id": "LM", "title": "Liked Music", "subtitle": "Playlist · Your likes",
-                 "length": "", "image": ""}
+                 "length": "", "image": "", "liked": True}
         if not sections or sections[0]["title"] != "Playlists":
             sections.insert(0, {"title": "Playlists", "items": []})
         playlists = sections[0]["items"]
         sections[0]["items"] = [liked] + [row for row in playlists if row["id"] != "LM"]
         return {"sections": sections}
+
+    # -- Your own playlists.
+
+    def playlists(self, args):
+        """Playlists songs can be added to: yours, without Liked Music and
+        Episodes for Later (YouTube fills those itself)."""
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to use your playlists")
+        rows = entries_of(self.call("get_library_playlists", limit=100))
+        return {"playlists": [row for row in rows if row["id"] not in ("LM", "SE")]}
+
+    def newplaylist(self, args):
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to make playlists")
+        title = args[0].strip()
+        videos = [args[1]] if len(args) > 1 and args[1] else None
+        result = self.call("create_playlist", title, "", "PRIVATE", video_ids=videos)
+        if not isinstance(result, str):
+            raise ApiError("failed", "YouTube Music didn't make the playlist")
+        return {"id": result, "title": title}
+
+    def addto(self, args):
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to use your playlists")
+        result = self.call("add_playlist_items", args[0], [args[1]])
+        if isinstance(result, dict) and result.get("status") != "STATUS_SUCCEEDED":
+            raise ApiError("failed", "It's already in that playlist")
+        return {}
 
     def open(self, args):
         """An album, artist or playlist page: a header and its sections. The
@@ -766,8 +802,9 @@ class Player:
             self.collections[kind, item_id] = self.remember(playlist.get("tracks"))
             author = playlist.get("author")
             count = playlist.get("trackCount")
+            liked = item_id == "LM"
             return {"type": kind, "id": item_id, "title": playlist.get("title") or "",
-                    "image": image_of(playlist),
+                    "image": "" if liked else image_of(playlist), "liked": liked,
                     "subtitle": joined("Playlist", (author or {}).get("name") if isinstance(author, dict) else author,
                                        f"{count} songs" if count else ""),
                     "sections": [{"title": "Songs", "items": entries_of(playlist.get("tracks"), numbered=True)}]}
@@ -1181,6 +1218,8 @@ class Player:
             raise ApiError("failed", f"Unknown command {command!r}")
         if command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
             raise ApiError("failed", USAGE[command])
+        if (command == "newplaylist" and not (args and str(args[0]).strip())) or (command == "addto" and len(args) < 2):
+            raise ApiError("failed", USAGE[command])
         return handler(args)
 
 
@@ -1352,11 +1391,16 @@ def run(command, args):
         args = [query, filter_name]
     elif command in ("play", "add") and not (args and args[0]):
         raise ApiError("failed", USAGE[command])
+    elif command == "newplaylist" and not (args and args[0].strip()):
+        raise ApiError("failed", USAGE["newplaylist"])
+    elif command == "addto" and len(args) < 2:
+        raise ApiError("failed", USAGE["addto"])
     elif command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
         raise ApiError("failed", USAGE[command])
     elif command == "login":
         args = [read_headers()]
-    slow = command in ("search", "home", "library", "open", "playall", "login", "account")
+    slow = command in ("search", "home", "library", "open", "playall", "login", "account",
+                       "playlists", "newplaylist", "addto")
     if command == "signin":
         result = request("POST", "/signin", {"args": []}, timeout=10)
         if not result.get("ok"):
