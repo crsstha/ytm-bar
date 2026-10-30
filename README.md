@@ -19,13 +19,32 @@ user service.
 
 ## Install
 
+From the Omarchy plugin marketplace, or straight from GitHub:
+
 ```bash
-omarchy pkg add mpv yt-dlp python-ytmusicapi mpv-mpris
-./install.sh            # --no-bindings to skip Super+Alt+M
+omarchy pkg add mpv yt-dlp python-ytmusicapi
+omarchy plugin add https://github.com/crsstha/ytm-bar --enable
 ```
 
-The installer links the `ytm-bar` and `ytm-tui` commands, enables
-`ytm-bar.service`, and adds the widget to the bar.
+The widget appears in the bar, and the player service starts by itself when the
+bar loads.
+
+**Dependencies** — required: `mpv`, `yt-dlp`, `python-ytmusicapi`. Optional:
+`mpv-mpris` (media keys), `python-pillow` (cover colours, cover art in the
+terminal), Chromium, Chrome or Brave (Sign in with Google). Omarchy ships all
+but `python-ytmusicapi`.
+
+**Extras (optional)** — run `install.sh` from the plugin folder:
+
+```bash
+~/.config/omarchy/plugins/crsstha.ytmusic/install.sh    # --no-bindings to skip the keybinding
+```
+
+It adds the `ytm-bar` and `ytm-tui` commands to `~/.local/bin`, a
+`ytm-bar.service` user unit (so the player, and your queue, are back at login),
+and a block in `~/.config/hypr/bindings.lua` between `ytm-bar` marker lines:
+`Super+Alt+M`, blur behind the popup, and floating windows for sign-in and
+`ytm-tui`. Nothing else in your configuration is changed.
 
 **Log in (optional)** — for likes, your library and a personal home page:
 ⚙ Settings → **Sign in with Google**. A small window opens on Google's sign-in
@@ -59,9 +78,10 @@ where you left it.
 
 <img src="docs/tui.png" alt="ytm-tui: now playing, the queue and the key hints" width="640">
 
-Run `ytm-tui` (or Settings → **Open in TUI**, which opens it as a floating
-window in the middle of the screen). The key hints are always at the bottom;
-the main ones:
+Open it from Settings → **Open in TUI**, or run `ytm-tui` (after `install.sh`;
+otherwise it's `~/.config/omarchy/plugins/crsstha.ytmusic/bin/ytm-tui`). With
+`install.sh`'s window rule it floats in the middle of the screen. The key hints
+are always at the bottom; the main ones:
 
 | Keys | |
 |---|---|
@@ -75,7 +95,8 @@ the main ones:
 
 ## Command line
 
-Everything also works from the shell; each command prints JSON:
+Everything also works from the shell (`ytm-bar` after `install.sh`, otherwise
+`~/.config/omarchy/plugins/crsstha.ytmusic/bin/ytm-bar`); each command prints JSON:
 
 ```
 ytm-bar toggle | next | previous | like | shuffle | repeat
@@ -87,7 +108,8 @@ ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
 
 ## Troubleshooting
 
-- **Pill stays dimmed** — the service is stopped: `systemctl --user status ytm-bar`.
+- **Pill stays dimmed** — the service is stopped. Click the pill to start it, or
+  `systemctl --user status ytm-bar` if you ran `install.sh`.
 - **"YouTube ended this login"** — sign in again from Settings.
 - **Search fails or songs skip** — ytmusicapi or yt-dlp needs an update
   (`omarchy update`); YouTube changes break them for a few days at a time.
@@ -101,5 +123,15 @@ ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
 - Your login is stored only in `~/.config/ytm-bar` (readable by you alone).
 - Fonts: [Geist](https://github.com/vercel/geist-font), under the SIL Open Font
   License (`fonts/OFL.txt`).
-- Tests: `python3 tests/test_cli.py`. Uninstall: `./uninstall.sh`
-  (`--purge` also removes the login).
+- Tests: `python3 tests/test_cli.py`.
+
+## Remove
+
+```bash
+~/.config/omarchy/plugins/crsstha.ytmusic/uninstall.sh   # only if you ran install.sh
+omarchy plugin remove crsstha.ytmusic
+```
+
+`uninstall.sh` stops the service and removes what `install.sh` added. Your
+login stays in `~/.config/ytm-bar` — `uninstall.sh --purge` removes it too
+(or delete that folder).

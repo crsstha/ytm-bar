@@ -22,6 +22,10 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property string cli: decodeURIComponent(String(Qt.resolvedUrl("bin/ytm-bar")).replace(/^file:\/\//, ""))
+  readonly property string tuiCli: decodeURIComponent(String(Qt.resolvedUrl("bin/ytm-tui")).replace(/^file:\/\//, ""))
+  // The service is started once if it isn't running when the bar loads, so a
+  // plain `omarchy plugin add` works without install.sh's systemd unit.
+  property bool autoStartTried: false
   readonly property string api: "http://127.0.0.1:26539"
   readonly property int maxTitleLength: 30
 
@@ -342,6 +346,10 @@ Panel {
       } else {
         root.song = null
         root.status = "offline"
+        if (!root.autoStartTried) {
+          root.autoStartTried = true
+          root.startApp()
+        }
       }
     }
     xhr.open("GET", root.api + "/song")
@@ -409,7 +417,8 @@ Panel {
   }
   property bool stateBusy: false
 
-  // The player runs as a systemd user service (ytm-bar.service).
+  // The player runs as a systemd user service (ytm-bar.service) when
+  // install.sh set one up; otherwise `ytm-bar start` runs it in the background.
   function startApp() {
     Quickshell.execDetached([root.cli, "start"])
     root.message = ""
@@ -656,7 +665,8 @@ Panel {
 
   // Focus ytm-tui's terminal if it's open, otherwise start one.
   function openTui() {
-    Quickshell.execDetached(["bash", "-lc", "omarchy-launch-or-focus-tui ytm-tui"])
+    // The plugin's own copy, so it works without install.sh's ~/.local/bin link.
+    Quickshell.execDetached(["bash", "-lc", 'omarchy-launch-or-focus-tui "$0"', root.tuiCli])
     root.close()
   }
 
