@@ -161,8 +161,8 @@ EQ_PRESETS = {
 BOOST_MAX = 150  # volume % allowed with boost on
 # Auto-pause: another app's sound pauses the music, which carries on after it.
 AUDIO_CLIENT = "ytm-bar"  # mpv's application.name, to tell its stream from others
-OTHER_SOUND_PAUSE = 1.0  # seconds another app must play before the music pauses
-OTHER_SOUND_RESUME = 2.0  # seconds of quiet before it carries on
+OTHER_SOUND_PAUSE = 0.4  # seconds another app must play before the music pauses
+OTHER_SOUND_RESUME = 1.0  # seconds of quiet before it carries on
 IGNORED_ROLES = {"event", "notification", "a11y", "accessibility"}
 
 
@@ -587,6 +587,8 @@ class Player:
         self.paused_for_other = False
         self._other_since = None
         self._quiet_since = None
+        self._sound_lock = threading.Lock()
+        self._sound_event = threading.Event()  # an app's audio stream changed
         # Sleep timer: {"mode": "min", "left": seconds, "minutes": n} counts down
         # while playing; {"mode": "end"} pauses when the current song ends.
         self.sleep = None
@@ -1246,9 +1248,39 @@ class Player:
         self.save()
         return {"autoPause": self.auto_pause}
 
+    def watch_sound(self):
+        """Auto-pause, driven by PipeWire: `pactl subscribe` reports each
+        change to an app's audio stream, so the check runs at once instead of
+        on the next tick. While a pause or resume is pending it re-checks
+        every 0.2 s; otherwise once a second, in case events stop coming."""
+        def listen():
+            while True:
+                try:
+                    proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, text=True)
+                    for line in proc.stdout:
+                        if "sink-input" in line:
+                            self._sound_event.set()
+                except OSError:
+                    pass
+                time.sleep(5)  # pactl ended (audio restarted?): listen again
+        threading.Thread(target=listen, daemon=True).start()
+        while True:
+            pending = self._other_since is not None or self._quiet_since is not None
+            self._sound_event.wait(0.2 if pending else 1.0)
+            self._sound_event.clear()
+            try:
+                self.check_other_sound()
+            except Exception:
+                traceback.print_exc()
+
     def check_other_sound(self):
         """Pause while another app plays sound; carry on once it has stopped,
         if it was this that paused."""
+        with self._sound_lock:
+            self._check_other_sound()
+
+    def _check_other_sound(self):
         if not self.auto_pause:
             return
         track, mpv = self.current()
@@ -1614,12 +1646,12 @@ def serve():
             ticks += 1
             try:
                 player.tick()
-                player.check_other_sound()
                 if ticks % SESSION_EVERY == 0:
                     player.save_session()
             except Exception:
                 traceback.print_exc()
     threading.Thread(target=ticker, daemon=True).start()
+    threading.Thread(target=player.watch_sound, daemon=True).start()
     # Stopping the service (SIGTERM) also stops mpv.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
