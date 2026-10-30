@@ -156,6 +156,20 @@ Panel {
     muted: "M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5",
     chevron: "M9 6l6 6-6 6",
     plus: "M12 5v14M5 12h14",
+    // Moods and genres (see moodIcon).
+    music: "M3 17a3 3 0 1 0 6 0a3 3 0 0 0 -6 0M9 17v-13h10v13M9 8h10M13 17a3 3 0 1 0 6 0a3 3 0 0 0 -6 0",
+    compass: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M8 16l2-6l6-2l-2 6z",
+    gamepad: "M2 8a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-16a2 2 0 0 1-2-2zM6 12h4M8 10v4M15 11v.01M18 13v.01",
+    family: "M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M16 3.13a4 4 0 0 1 0 7.75M21 21v-2a4 4 0 0 0-3-3.85",
+    coffee: "M3 10h14v5a6 6 0 0 1-6 6h-2a6 6 0 0 1-6-6zM17 12h1a3 3 0 0 1 0 6h-1M8 3c-.5 1 .5 2 0 3M12 3c-.5 1 .5 2 0 3",
+    bolt: "M13 3v7h6l-8 11v-7h-6l8-11",
+    sun: "M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M3 12h1M20 12h1M12 3v1M12 20v1M5.6 5.6l.7.7M17.7 17.7l.7.7M5.6 18.4l.7-.7M17.7 6.3l.7-.7",
+    target: "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M7 12a5 5 0 1 0 10 0a5 5 0 1 0 -10 0M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0",
+    rain: "M7 18a4.6 4.4 0 0 1 0-9a5 4.5 0 0 1 11 2h1a3.5 3.5 0 0 1 0 7M11 13v2M11 18v2M15 15v2M15 20v1",
+    car: "M5 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M15 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M5 17h-2v-6l2-5h9l4 5h1a2 2 0 0 1 2 2v4h-2M9 17h6M3 11h15M12 11v-5",
+    sparkles: "M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2-2a2 2 0 0 1-2-2a2 2 0 0 1-2 2zM16 6a2 2 0 0 1 2 2a2 2 0 0 1 2-2a2 2 0 0 1-2-2a2 2 0 0 1-2 2zM9 18a6 6 0 0 1 6-6a6 6 0 0 1-6-6a6 6 0 0 1-6 6a6 6 0 0 1 6 6z",
+    dumbbell: "M2 12h1M6 8h-2a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2M6 7v10a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-10a1 1 0 0 0-1-1h-1a1 1 0 0 0-1 1M9 12h6M15 7v10a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-10a1 1 0 0 0-1-1h-1a1 1 0 0 0-1 1M18 8h2a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M22 12h-1",
+    clock: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 7v5l3 3",
     check: "M5 12l5 5l10-10",
     playlistAdd: "M19 8h-14M5 12h9M11 16h-6M15 16h6M18 13v6",
     list: "M9 6h11M9 12h11M9 18h11M5 6v.01M5 12v.01M5 18v.01",
@@ -257,6 +271,22 @@ Panel {
   }
 
   // A stable hue per title, for the placeholder art gradient.
+  // An icon for a mood or genre tile and page, from its name.
+  function moodIcon(title) {
+    var t = (title || "").toLowerCase()
+    var rules = [
+      [["sleep", "bedtime", "night"], "moon"], [["romance", "love"], "like"], [["family", "kids"], "family"],
+      [["gaming"], "gamepad"], [["chill", "relax", "coffee"], "coffee"], [["workout", "fitness"], "dumbbell"],
+      [["energ", "party", "dance"], "bolt"], [["feel good", "happy"], "sun"], [["focus", "study"], "target"],
+      [["sad"], "rain"], [["commute", "drive"], "car"], [["decade", "19", "20"], "clock"],
+      [["for you"], "sparkles"]
+    ]
+    for (var i = 0; i < rules.length; i++)
+      for (var j = 0; j < rules[i][0].length; j++)
+        if (t.indexOf(rules[i][0][j]) >= 0) return rules[i][1]
+    return "music"  // genres
+  }
+
   function hueOf(text) {
     var h = 0
     for (var i = 0; i < (text || "").length; i++) h = (h * 31 + text.charCodeAt(i)) % 360
@@ -1137,8 +1167,11 @@ Panel {
     property string source: ""
     property string seed: ""
     property real radius: 8
-    // Liked Music: a heart on the accent instead of YouTube's thumbs-up art.
+    // Liked Music: a heart on the accent instead of YouTube's thumbs-up art;
+    // `glyph` puts any icon on that tile (mood and genre pages).
     property bool liked: false
+    property string glyph: ""
+    readonly property string tileIcon: liked ? "likeFill" : glyph
     readonly property real hue: root.hueOf(seed)
 
     Rectangle {
@@ -1157,10 +1190,10 @@ Panel {
       asynchronous: true
       sourceSize.width: art.width * 2
       sourceSize.height: art.height * 2
-      source: art.liked ? "" : art.source
+      source: art.tileIcon !== "" ? "" : art.source
     }
     Rectangle {
-      visible: art.liked
+      visible: art.tileIcon !== ""
       anchors.fill: parent
       radius: art.radius
       gradient: Gradient {
@@ -1171,8 +1204,9 @@ Panel {
 
       Icon {
         anchors.centerIn: parent
-        name: "likeFill"
+        name: art.tileIcon
         size: parent.width * 0.42
+        stroke: art.liked ? 2 : 1.6
         color: "#ffffff"
       }
     }
@@ -1607,6 +1641,7 @@ Panel {
                 source: root.page ? root.page.image || "" : ""
                 seed: root.page ? root.page.title : ""
                 liked: root.page !== null && root.page.liked === true
+                glyph: root.page && root.page.type === "mood" ? root.moodIcon(root.page.title) : ""
               }
               Column {
                 width: parent.width - pageArt.width - parent.spacing
@@ -2359,9 +2394,19 @@ Panel {
                         Behavior on color { ColorAnimation { duration: 120 } }
                         Behavior on border.color { ColorAnimation { duration: 120 } }
 
-                        Label {
+                        Icon {
+                          id: tileIcon
                           anchors.left: parent.left
-                          anchors.leftMargin: 14
+                          anchors.leftMargin: 13
+                          anchors.verticalCenter: parent.verticalCenter
+                          name: root.moodIcon(tile.modelData.title)
+                          size: 15
+                          stroke: 1.8
+                          color: tileArea.containsMouse ? root.accent : root.white(0.5)
+                        }
+                        Label {
+                          anchors.left: tileIcon.right
+                          anchors.leftMargin: 10
                           anchors.right: tileChevron.left
                           anchors.rightMargin: 8
                           anchors.verticalCenter: parent.verticalCenter
