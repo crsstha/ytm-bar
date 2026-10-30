@@ -162,7 +162,7 @@ BOOST_MAX = 150  # volume % allowed with boost on
 # Auto-pause: another app's sound pauses the music, which carries on after it.
 AUDIO_CLIENT = "ytm-bar"  # mpv's application.name, to tell its stream from others
 OTHER_SOUND_PAUSE = 0.4  # seconds another app must play before the music pauses
-OTHER_SOUND_RESUME = 1.0  # seconds of quiet before it carries on
+OTHER_SOUND_RESUME = 0.6  # seconds of quiet before it carries on
 IGNORED_ROLES = {"event", "notification", "a11y", "accessibility"}
 
 
@@ -444,16 +444,40 @@ def window_title(pid):
         return ""
 
 
+def mpris_players():
+    """Other media players' (identity, PlaybackStatus), lowercase, over D-Bus."""
+    def busctl(*args):
+        return subprocess.run(["busctl", "--user", *args], capture_output=True, text=True, timeout=2).stdout
+    players = []
+    try:
+        for line in busctl("list", "--no-legend").splitlines():
+            name = line.split(" ", 1)[0]
+            if not name.startswith("org.mpris.MediaPlayer2."):
+                continue
+            identity = busctl("get-property", name, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2", "Identity")
+            status = busctl("get-property", name, "/org/mpris/MediaPlayer2",
+                            "org.mpris.MediaPlayer2.Player", "PlaybackStatus")
+            identity = identity.strip().removeprefix("s ").strip('"').lower()
+            if identity and identity != AUDIO_CLIENT:
+                players.append((identity, status.strip().removeprefix("s ").strip('"').lower()))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return players
+
+
 def other_sound_playing():
-    """Whether an app other than this player is playing sound right now:
-    an uncorked, unmuted, audible stream (PipeWire/PulseAudio, via pactl),
-    not counting notification and other event sounds."""
+    """Whether an app other than this player is playing sound right now: an
+    uncorked, unmuted, audible stream (PipeWire/PulseAudio, via pactl), not
+    counting notification and other event sounds. Browsers keep their stream
+    open, playing silence, for a while after a video is paused; so an app
+    that is also a media player (MPRIS) counts only while it says "Playing"."""
     try:
         out = subprocess.run(["pactl", "-f", "json", "list", "sink-inputs"],
                              capture_output=True, text=True, timeout=3).stdout
         streams = json.loads(out or "[]")
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
+    players = None  # looked up only if a stream needs it
     for stream in streams:
         props = stream.get("properties") or {}
         if props.get("application.name") == AUDIO_CLIENT or stream.get("corked") or stream.get("mute"):
@@ -463,6 +487,12 @@ def other_sound_playing():
         levels = [str(c.get("value_percent", "0")).rstrip("%") for c in (stream.get("volume") or {}).values()]
         if levels and all(level in ("0", "0.0") for level in levels):
             continue
+        app = (props.get("application.name") or props.get("application.process.binary") or "").lower()
+        if players is None:
+            players = mpris_players()
+        matching = [status for identity, status in players if app and (app in identity or identity in app)]
+        if matching and "playing" not in matching:
+            continue  # a paused media player's leftover stream
         return True
     return False
 
@@ -1266,8 +1296,10 @@ class Player:
                 time.sleep(5)  # pactl ended (audio restarted?): listen again
         threading.Thread(target=listen, daemon=True).start()
         while True:
+            # Soon after a change, check often; while paused for another app,
+            # every 0.5 s (a browser pausing its video sends no stream event).
             pending = self._other_since is not None or self._quiet_since is not None
-            self._sound_event.wait(0.2 if pending else 1.0)
+            self._sound_event.wait(0.2 if pending else 0.5 if self.paused_for_other else 1.0)
             self._sound_event.clear()
             try:
                 self.check_other_sound()
