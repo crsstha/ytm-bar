@@ -7,8 +7,9 @@ browsing and radio, mpv + yt-dlp for the audio.
                           It owns mpv and the queue, and serves the commands
                           below on 127.0.0.1.
   ytm-bar start           Start the service, unless it's running.
-  ytm-bar login           Connect your YouTube Music account (likes, library,
-                          personal home): paste request headers from your browser.
+  ytm-bar signin          Connect your YouTube Music account (likes, library,
+                          personal home): sign in to Google in a browser window.
+  ytm-bar login           The same, by pasting request headers from your browser.
   ytm-bar logout          Forget the account.
   ytm-bar account         Whether you're logged in, and as whom.
   ytm-bar song            The current song, as JSON.
@@ -43,6 +44,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -64,6 +66,13 @@ API = f"http://127.0.0.1:{PORT}"
 HEADER = "X-Ytm-Bar"
 CONFIG = Path.home() / ".config/ytm-bar"
 AUTH_FILE = CONFIG / "browser.json"
+# "Sign in with Google" opens a Chromium window with this profile, kept for
+# ytm-bar alone, and reads the login from its cookies.
+SIGNIN_PROFILE = CONFIG / "chromium"
+SIGNIN_URL = ("https://accounts.google.com/ServiceLogin?service=youtube&continue="
+              "https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3D"
+              "https%253A%252F%252Fmusic.youtube.com%252F")
+SIGNIN_BROWSERS = ("chromium", "google-chrome-stable", "brave")
 STATE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "ytm-bar/state.json"
 MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock"
 SERVICE = "ytm-bar.service"
@@ -102,7 +111,7 @@ USAGE = {
     "move": "Usage: ytm-bar move FROM TO",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
-            "shuffle", "repeat", "home", "library", "account", "login", "logout",
+            "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout",
             "mute", "boost", *USAGE}
 
 # Equalizer presets: gains in dB for five bands, as in the design.
@@ -279,6 +288,30 @@ def normalize_headers(text):
     return "\n".join(f"{name}: {value}" for name, value in pairs if not name.startswith(":"))
 
 
+def profile_headers(profile):
+    """Request headers for YouTube Music made from the cookies in a Chromium
+    profile, or None while it isn't signed in."""
+    from yt_dlp.cookies import extract_cookies_from_browser
+    if not any(Path(profile).glob("*/**/Cookies")):
+        return None  # Chromium hasn't saved any cookies yet
+    # --password-store=basic (see Player.signin) encrypts with a fixed key, so
+    # no keyring is needed to read them back.
+    jar = extract_cookies_from_browser("chromium", profile=str(profile), keyring="BASICTEXT")
+    cookies = {c.name: c.value for c in jar if (c.domain or "").endswith("youtube.com")}
+    if not cookies.get("__Secure-3PAPISID"):
+        return None
+    from ytmusicapi.helpers import get_authorization
+    origin = "https://music.youtube.com"
+    # ytmusicapi only treats a login as cookies (not OAuth) with an
+    # authorization header; it signs each request afresh anyway.
+    return "\n".join([
+        "cookie: " + "; ".join(f"{k}={v}" for k, v in cookies.items()),
+        "x-goog-authuser: 0",
+        f"origin: {origin}",
+        "authorization: " + get_authorization(cookies["__Secure-3PAPISID"] + " " + origin),
+    ])
+
+
 def video_id_of(url):
     match = re.search(r"[?&]v=([\w-]{11})", url or "")
     return match.group(1) if match else None
@@ -400,6 +433,8 @@ class Player:
         self._yt_auth = None
         self._home = (0, None, None)  # (time, auth, sections)
         self._account = (None, None)  # (auth, info)
+        self._signin = None  # the sign-in window's process, while it's watched
+        self.signin_error = ""
         try:
             saved = json.loads(STATE_FILE.read_text())
             self.volume = int(saved.get("volume", self.volume))
@@ -602,6 +637,8 @@ class Player:
             "sleep": dict(sleep) if sleep else None,
             "muted": self.muted,
             "loggedIn": self.logged_in,
+            "signingIn": self.signing_in,
+            "signinError": self.signin_error,
             **self.queue(args),
         }
 
@@ -721,7 +758,19 @@ class Player:
             return {"loggedIn": False, "name": "", "photo": ""}
         cached_auth, info = self._account
         if info is None or cached_auth != stamp:
-            info = self.call("get_account_info")
+            try:
+                info = self.call("get_account_info")
+            except ApiError as e:
+                # YouTube answers saved cookies it has revoked (after a sign-out in
+                # the browser they came from) as a guest, without an account header.
+                if "activeAccountHeaderRenderer" not in str(e):
+                    raise
+                AUTH_FILE.replace(AUTH_FILE.with_suffix(".expired"))
+                self._account = (None, None)
+                # The sign-in window's profile may hold newer cookies.
+                if not self.signing_in and self.login_from_profile():
+                    return self.account(args)
+                return {"loggedIn": False, "name": "", "photo": "", "expired": True}
             self._account = (stamp, info)
         return {"loggedIn": True, "name": info.get("accountName") or "",
                 "handle": info.get("channelHandle") or "", "photo": info.get("accountPhotoUrl") or ""}
@@ -732,6 +781,9 @@ class Player:
         headers = normalize_headers(args[0] if args else "")
         if not headers:
             raise ApiError("failed", "Paste the request headers first")
+        return self.save_login(headers)
+
+    def save_login(self, headers):
         try:
             from ytmusicapi import YTMusic, setup
             auth = setup(headers_raw=headers)
@@ -751,7 +803,66 @@ class Player:
     def logout(self, args):
         AUTH_FILE.unlink(missing_ok=True)
         self._account = (None, None)
+        # Forget the sign-in window's profile too, or it would log back in.
+        subprocess.run(["rm", "-rf", "--", str(SIGNIN_PROFILE)], check=False)
         return {"loggedIn": False}
+
+    @property
+    def signing_in(self):
+        return self._signin is not None
+
+    def signin(self, args):
+        """Open a browser window to sign in to Google. Once YouTube Music's
+        cookies show up in its profile, they become the login and the window
+        closes."""
+        with self.lock:
+            if self.signing_in:
+                return {"signingIn": True}
+            browser = next((b for b in SIGNIN_BROWSERS if shutil.which(b)), None)
+            if not browser:
+                raise ApiError("failed", "Signing in needs Chromium — run: omarchy pkg add chromium")
+            SIGNIN_PROFILE.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.signin_error = ""
+            self._signin = subprocess.Popen([
+                browser, f"--user-data-dir={SIGNIN_PROFILE}", "--password-store=basic",
+                "--no-first-run", "--no-default-browser-check", f"--app={SIGNIN_URL}",
+                "--class=ytm-bar-signin",
+            ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            threading.Thread(target=self.watch_signin, args=(self._signin,), daemon=True).start()
+        return {"signingIn": True}
+
+    def watch_signin(self, proc):
+        error, tried = "The window closed before you signed in", None
+        while True:
+            closed = proc.poll() is not None
+            try:
+                headers = profile_headers(SIGNIN_PROFILE)
+                if headers and headers != tried:
+                    tried = headers
+                    self.save_login(headers)
+                    error = ""
+                    break
+            except ApiError as e:
+                error = str(e)
+            except Exception as e:
+                error = f"Couldn't read the sign-in window: {e}"
+            if closed:
+                break
+            time.sleep(2)
+        if proc.poll() is None:
+            proc.terminate()  # signed in: close the window
+        self.signin_error = error
+        self._signin = None
+
+    def login_from_profile(self):
+        if not SIGNIN_PROFILE.exists():
+            return False
+        try:
+            headers = profile_headers(SIGNIN_PROFILE)
+            return bool(headers) and bool(self.save_login(headers))
+        except Exception:
+            return False
 
     # -- Controls.
 
@@ -1110,6 +1221,19 @@ def run(command, args):
     elif command == "login":
         args = [read_headers()]
     slow = command in ("search", "home", "library", "open", "playall", "login", "account")
+    if command == "signin":
+        result = request("POST", "/signin", {"args": []}, timeout=10)
+        if not result.get("ok"):
+            raise ApiError(result.get("code", "failed"), result.get("error", "Failed"))
+        print("Sign in to Google in the window that opened; it closes when you're done.", file=sys.stderr)
+        while True:
+            time.sleep(1)
+            state = request("POST", "/state", {"args": []}, timeout=10)
+            if not state.get("signingIn"):
+                break
+        if not state.get("loggedIn"):
+            raise ApiError("unauthorized", state.get("signinError") or "Not signed in")
+        return {"loggedIn": True}
     result = request("POST", "/" + command, {"args": args}, timeout=60 if slow else 10)
     if not result.get("ok"):
         raise ApiError(result.get("code", "failed"), result.get("error", "Failed"))

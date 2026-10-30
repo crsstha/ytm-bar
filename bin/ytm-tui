@@ -1,0 +1,1196 @@
+#!/usr/bin/env python3
+"""ytm-tui — the Mini Player in a terminal. Same tabs and controls as the bar
+popup (Now, Search, Library, Home, Settings), driven by the ytm-bar service.
+
+Keys (also shown at the bottom):
+  1-4 / Tab      Now, Search, Library, Home        ,  Settings
+  space          play / pause      n / p   next / previous
+  ← / →          seek 5 s          + / -   volume
+  m  mute        s  shuffle        r  repeat       l / d  like / dislike
+  ↑ ↓ / j k      move              Enter   play or open        a  play next
+  On Up next:    x remove   u play next   J / K move down / up
+  /              search            Esc / Backspace  back        q  quit
+The mouse works too: click tabs, rows and controls; scroll lists.
+"""
+
+import io
+import json
+import os
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty
+import unicodedata
+import urllib.error
+import urllib.request
+
+PORT = int(os.environ.get("YTM_BAR_PORT", "26539"))
+API = f"http://127.0.0.1:{PORT}"
+CLI = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ytm-bar")
+CARD_WIDTH = 84  # the design's 640px terminal at 12.5px Geist Mono
+
+# ---- The design's colours, as truecolor RGB.
+ACCENT = (243, 201, 139)
+INK = (242, 242, 240)
+WHITE = (255, 255, 255)
+BLACK = (17, 17, 17)
+BASE = (18, 20, 24)  # the card tint the greys are mixed over
+
+
+def white(alpha):
+    """The design's rgba(255,255,255,alpha) over the dark card."""
+    return tuple(round(b + (255 - b) * alpha) for b in BASE)
+
+
+def hue_colors(seed):
+    """Placeholder art: a gradient in a hue picked from the title."""
+    h = 0
+    for ch in seed or "":
+        h = (h * 31 + ord(ch)) % 360
+    import colorsys
+    top = colorsys.hls_to_rgb(h / 360, 0.42, 0.35)
+    bottom = colorsys.hls_to_rgb(h / 360, 0.14, 0.3)
+    return tuple(round(c * 255) for c in top), tuple(round(c * 255) for c in bottom)
+
+
+# Nerd Font icons (CaskaydiaMono NF, the bar's font).
+ICON = {
+    "play": "\U000F040A", "pause": "\U000F03E4", "prev": "\U000F04AE", "next": "\U000F04AD",
+    "shuffle": "\U000F049D", "repeat": "\U000F0456", "repeatOne": "\U000F0458",
+    "like": "\U000F0513", "likeOff": "\U000F0514", "dislike": "\U000F0511", "dislikeOff": "\U000F0512",
+    "volume": "\U000F057E", "muted": "\U000F075F", "search": "\U000F0349", "settings": "\U000F062E",
+    "moon": "\U000F0594", "chevron": "\U000F0142", "up": "\U000F005D", "close": "\U000F0156",
+    "account": "\U000F0004", "music": "\U000F075A", "back": "\U000F004D",
+}
+CAP_LEFT, CAP_RIGHT = "", ""  # rounded ends, for pills
+
+TABS = [("now", "Now"), ("search", "Search"), ("library", "Library"), ("home", "Home")]
+FILTERS = [("all", "All"), ("songs", "Songs"), ("albums", "Albums"), ("artists", "Artists"),
+           ("playlists", "Playlists"), ("videos", "Videos")]
+SLEEP = [("off", "Off"), ("15", "15 min"), ("30", "30 min"), ("60", "1 hr"), ("end", "End of song")]
+EQ = [("flat", "Flat", (0, 0, 0, 0, 0)), ("bass", "Bass", (5, 4, 1, 0, 0)), ("vocal", "Vocal", (-1, 0, 4, 3, 0)),
+      ("treble", "Treble", (0, 0, 1, 4, 5)), ("loudness", "Loudness", (5, 2, 0, 2, 5)),
+      ("night", "Night", (-1, 0, 2, 1, -1))]
+BARS = " ▁▂▃▄▅▆▇█"
+
+
+# ---- The service.
+
+def call(command, args=(), timeout=10):
+    body = json.dumps({"args": [str(a) for a in args]}).encode()
+    req = urllib.request.Request(API + "/" + command, data=body, method="POST",
+                                 headers={"X-Ytm-Bar": "1", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read() or b"{}")
+    except (urllib.error.URLError, ConnectionError, TimeoutError, ValueError):
+        return {"ok": False, "code": "offline", "error": "The player isn't running — press Enter to start it"}
+
+
+def get_song():
+    """The current song, None when nothing is loaded, or "offline"."""
+    req = urllib.request.Request(API + "/song", headers={"X-Ytm-Bar": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            raw = resp.read()
+            return json.loads(raw) if resp.status == 200 and raw else None
+    except (urllib.error.URLError, ConnectionError, TimeoutError, ValueError):
+        return "offline"
+
+
+def clock(seconds):
+    s = max(0, int(seconds or 0))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+# ---- Cover art: thumbnails drawn with half blocks (two pixels per cell).
+
+class Art:
+    def __init__(self, on_ready):
+        self.cache = {}  # (url, cols, rows) -> [[(top, bottom), ...], ...] or None while loading
+        self.on_ready = on_ready
+        self.lock = threading.Lock()
+        self.pending = 0
+
+    def get(self, url, cols, rows):
+        if not url:
+            return None
+        key = (url, cols, rows)
+        with self.lock:
+            if key in self.cache:
+                return self.cache[key]
+            if self.pending >= 6:  # a few downloads at a time
+                return None
+            self.cache[key] = None
+            self.pending += 1
+        threading.Thread(target=self.load, args=(key,), daemon=True).start()
+        return None
+
+    def load(self, key):
+        url, cols, rows = key
+        pixels = None
+        try:
+            from PIL import Image
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                image = Image.open(io.BytesIO(resp.read())).convert("RGB")
+            side = min(image.size)  # crop to a square, like the design's art
+            left, top = (image.width - side) // 2, (image.height - side) // 2
+            image = image.crop((left, top, left + side, top + side)).resize((cols, rows * 2), Image.LANCZOS)
+            data = image.load()
+            pixels = [[(data[x, y * 2], data[x, y * 2 + 1]) for x in range(cols)] for y in range(rows)]
+        except Exception:
+            pixels = False  # keep the placeholder
+        with self.lock:
+            self.cache[key] = pixels
+            self.pending -= 1
+        self.on_ready()
+
+
+# ---- Drawing: a grid of cells with styles, rendered as truecolor ANSI.
+
+def cell_width(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def text_width(text):
+    return sum(cell_width(ch) for ch in text)
+
+
+def clip(text, width):
+    """Cut text to `width` cells, ending in … when it's too long."""
+    if text_width(text) <= width:
+        return text
+    out, used = "", 0
+    for ch in text:
+        w = cell_width(ch)
+        if used + w > width - 1:
+            break
+        out += ch
+        used += w
+    return out + "…"
+
+
+class Canvas:
+    def __init__(self, width, height):
+        self.w, self.h = width, height
+        self.chars = [[" "] * width for _ in range(height)]
+        self.fg = [[None] * width for _ in range(height)]
+        self.bg = [[None] * width for _ in range(height)]
+        self.bold = [[False] * width for _ in range(height)]
+        self.clicks = []  # (y, x0, x1, action, wants_column)
+
+    def put(self, y, x, text, fg=INK, bg=None, bold=False, limit=None):
+        """Write text at (y, x); returns the column after it."""
+        if not 0 <= y < self.h:
+            return x
+        end = min(self.w, limit if limit is not None else self.w)
+        for ch in text:
+            w = cell_width(ch)
+            if w == 0:
+                continue
+            if x + w > end:
+                break
+            if x >= 0:
+                self.chars[y][x] = ch
+                self.fg[y][x] = fg
+                if bg is not None:
+                    self.bg[y][x] = bg
+                self.bold[y][x] = bold
+                if w == 2 and x + 1 < self.w:
+                    self.chars[y][x + 1] = ""
+            x += w
+        return x
+
+    def fill(self, y, x, width, bg):
+        if 0 <= y < self.h:
+            for i in range(max(0, x), min(self.w, x + width)):
+                self.bg[y][i] = bg
+
+    def click(self, y, x0, x1, action, column=False):
+        """A clickable span; with column=True the action gets the clicked column."""
+        self.clicks.append((y, x0, x1, action, column))
+
+    def render(self):
+        out = ["\x1b[H"]
+        for y in range(self.h):
+            style = None
+            for x in range(self.w):
+                ch = self.chars[y][x]
+                if ch == "":
+                    continue
+                s = (self.fg[y][x], self.bg[y][x], self.bold[y][x])
+                if s != style:
+                    code = ["0"]
+                    if s[2]:
+                        code.append("1")
+                    if s[0]:
+                        code.append("38;2;%d;%d;%d" % s[0])
+                    if s[1]:
+                        code.append("48;2;%d;%d;%d" % s[1])
+                    out.append("\x1b[" + ";".join(code) + "m")
+                    style = s
+                out.append(ch)
+            out.append("\x1b[0m")
+            if y < self.h - 1:
+                out.append("\r\n")
+        return "".join(out)
+
+
+# ---- The app.
+
+class App:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.dirty = threading.Event()
+        self.running = True
+        self.status = "offline"
+        self.song = None
+        self.song_at = time.time()
+        self.player = {"like": "INDIFFERENT", "shuffle": False, "repeat": "NONE", "volume": 0, "maxVolume": 100,
+                       "boost": False, "eq": "flat", "sleep": None, "muted": False, "loggedIn": False,
+                       "queue": [], "queueCount": 0}
+        self.player_at = time.time()
+        self.account = {"loggedIn": False, "name": ""}
+        self.message = ""
+        self.tab = "now"
+        self.pages = []
+        self.views = {}  # view key -> {"sel": i, "scroll": n}
+        self.query = ""
+        self.typing = False  # the search box has the keyboard
+        self.filter = "all"
+        self.searched = ""
+        self.search_sections = []
+        self.search_error = ""
+        self.search_due = 0.0
+        self.search_seq = 0
+        self.home = None
+        self.library = None
+        self.settings_row = 0
+        self.settings_col = {0: 0, 1: 0}
+        self.art = Art(self.dirty.set)
+        self.canvas = None
+
+    # -- Talking to the service in the background, so keys never wait.
+
+    def run_bg(self, fn):
+        def wrapped():
+            try:
+                fn()
+            finally:
+                self.dirty.set()
+        threading.Thread(target=wrapped, daemon=True).start()
+
+    def action(self, name, *args):
+        if name in ("like", "dislike") and not self.player.get("loggedIn"):
+            self.message = "Log in (Settings) to like songs"
+            return
+
+        def go():
+            result = call(name, args, timeout=30)
+            self.message = "" if result.get("ok") else result.get("error", "That didn't work")
+            time.sleep(0.3)
+            self.refresh()
+        self.run_bg(go)
+
+    def refresh(self):
+        song = get_song()
+        state = call("state") if song != "offline" else None
+        with self.lock:
+            if song == "offline":
+                self.status, self.song = "offline", None
+            else:
+                self.status, self.song = ("ok" if song else "idle"), song
+                self.song_at = time.time()
+            if state and state.get("ok"):
+                # "Sign in with Google" finished: show the account, or why not.
+                if self.player.get("signingIn") and not state.get("signingIn"):
+                    if state.get("loggedIn"):
+                        self.load_account()
+                        self.home = self.library = None
+                        self.message = ""
+                    else:
+                        self.message = state.get("signinError") or "Not signed in"
+                self.player, self.player_at = state, time.time()
+        self.dirty.set()
+
+    def poll(self):
+        while self.running:
+            self.refresh()
+            time.sleep(1)
+
+    def load_home(self):
+        self.home = {"loading": True}
+        def go():
+            result = call("home", timeout=60)
+            self.home = result if result.get("ok") else {"error": result.get("error")}
+        self.run_bg(go)
+
+    def load_library(self):
+        self.library = {"loading": True}
+        def go():
+            result = call("library", timeout=60)
+            self.library = result if result.get("ok") else {"error": result.get("error")}
+        self.run_bg(go)
+
+    def load_account(self):
+        def go():
+            result = call("account", timeout=30)
+            if result.get("ok"):
+                self.account = result
+        self.run_bg(go)
+
+    def run_search(self):
+        query = self.query.strip()
+        key = self.filter + "\n" + query
+        if not query or key == self.searched:
+            return
+        self.search_seq += 1
+        seq = self.search_seq
+        def go():
+            result = call("search", (query, self.filter), timeout=60)
+            if seq != self.search_seq:
+                return
+            self.searched = key
+            self.search_sections = result.get("sections", []) if result.get("ok") else []
+            self.search_error = "" if result.get("ok") else result.get("error", "Search failed")
+            self.views.pop("search", None)
+        self.run_bg(go)
+
+    def open_page(self, entry):
+        page = {"type": entry["type"], "id": entry["id"], "title": entry["title"], "subtitle": entry.get("subtitle", ""),
+                "image": entry.get("image", ""), "sections": [], "loading": True, "error": ""}
+        self.pages.append(page)
+        def go():
+            result = call("open", (entry["type"], entry["id"]), timeout=60)
+            if result.get("ok"):
+                page.update(result, loading=False)
+            else:
+                page.update(loading=False, error=result.get("error", "Couldn't open it"))
+        self.run_bg(go)
+
+    def activate(self, entry):
+        """Songs play (an album or playlist from that song on); the rest open."""
+        page = self.pages[-1] if self.pages else None
+        if entry["type"] == "queue":
+            if not entry.get("current"):
+                self.action("jump", entry["index"])
+        elif entry["type"] in ("song", "video"):
+            if page and page["type"] != "artist" and "index" in entry:
+                self.action("playall", page["type"], page["id"], entry["index"])
+            else:
+                self.action("play", entry["id"])
+        else:
+            self.open_page(entry)
+
+    def set_tab(self, tab):
+        self.tab = tab
+        self.pages = []
+        self.typing = tab == "search"
+        if tab == "home" and self.home is None:
+            self.load_home()
+        if tab == "library" and self.library is None:
+            self.load_library()
+        if tab == "settings":
+            self.load_account()
+
+    def start_service(self):
+        self.message = "Starting the player…"
+        def go():
+            result = subprocess.run([CLI, "start"], capture_output=True, text=True)
+            self.message = "" if '"ok": true' in result.stdout else "Couldn't start the player — see journalctl --user -u ytm-bar"
+            self.refresh()
+        self.run_bg(go)
+
+    # -- What the current view lists.
+
+    def view_key(self):
+        if self.pages:
+            return "page:" + self.pages[-1]["id"]
+        return self.tab
+
+    def view(self):
+        return self.views.setdefault(self.view_key(), {"sel": 0, "scroll": 0})
+
+    def sections(self):
+        if self.pages:
+            return self.pages[-1].get("sections") or []
+        if self.tab == "now":
+            rows = [{"type": "queue", "id": str(q["index"]), "index": q["index"], "title": q["title"],
+                     "subtitle": q.get("artist", ""), "length": q.get("length", ""), "image": q.get("image", ""),
+                     "current": q.get("current")} for q in self.player.get("queue", [])]
+            return [{"title": "Up next", "items": rows}]
+        if self.tab == "search":
+            return self.search_sections if self.query.strip() else []
+        if self.tab == "home":
+            return (self.home or {}).get("sections", [])
+        if self.tab == "library":
+            return (self.library or {}).get("sections", [])
+        return []
+
+    def entries(self):
+        return [item for section in self.sections() for item in section["items"]]
+
+    def selected(self):
+        entries = self.entries()
+        if not entries:
+            return None
+        view = self.view()
+        view["sel"] = max(0, min(view["sel"], len(entries) - 1))
+        return entries[view["sel"]]
+
+    # -- Live values between polls.
+
+    def elapsed(self):
+        song = self.song
+        if not song:
+            return 0
+        extra = 0 if song.get("isPaused") else time.time() - self.song_at
+        return min(song.get("songDuration") or 0, (song.get("elapsedSeconds") or 0) + extra)
+
+    def sleep_label(self):
+        sleep = self.player.get("sleep")
+        if not sleep:
+            return ""
+        if sleep["mode"] == "end":
+            return "End of song"
+        playing = self.song and not self.song.get("isPaused")
+        return clock(max(0, sleep["left"] - (time.time() - self.player_at if playing else 0)))
+
+    # ---- Drawing.
+
+    def draw(self, cols, rows):
+        c = Canvas(cols, rows)
+        self.canvas = c
+        width = min(cols, CARD_WIDTH)
+        x0 = (cols - width) // 2
+        left, inner = x0 + 2, width - 4
+        self.draw_tabs(c, 0, left, inner)
+        c.put(1, 0, "─" * cols, white(0.08))
+        hints = self.hints()
+        footer = self.layout_hints(hints, inner)
+        c.put(rows - len(footer) - 1, 0, "─" * cols, white(0.08))
+        y = 3
+        if self.status == "offline":
+            c.put(y, left, clip("The player isn't running — press Enter to start it", inner), white(0.45))
+            y += 2
+        elif self.message:
+            c.put(y, left, clip(self.message, inner), ACCENT)
+            y += 1
+        bottom = rows - len(footer) - 2
+        if self.pages:
+            self.draw_page(c, y, left, inner, bottom)
+        elif self.tab == "now":
+            self.draw_now(c, y, left, inner, bottom)
+        elif self.tab == "search":
+            self.draw_search(c, y, left, inner, bottom)
+        elif self.tab == "settings":
+            self.draw_settings(c, y, left, inner, bottom)
+        else:
+            data = self.home if self.tab == "home" else self.library
+            if self.tab == "library" and not self.player.get("loggedIn"):
+                c.put(y + 1, left, "Log in (Settings, press ,) to see your library.", white(0.45))
+            elif data is None or data.get("loading"):
+                c.put(y + 1, left, "Loading…", white(0.45))
+            elif data.get("error"):
+                c.put(y + 1, left, clip(data["error"], inner), white(0.45))
+            else:
+                self.draw_list(c, y, left, inner, bottom)
+        for i, line in enumerate(footer):
+            at = left
+            for key, label in line:
+                c.put(rows - len(footer) + i, at, key, ACCENT)
+                c.put(rows - len(footer) + i, at + text_width(key) + 1, label, white(0.45))
+                at += text_width(key) + 1 + text_width(label) + 2
+        return c
+
+    def draw_tabs(self, c, y, x, width):
+        # The segmented control: Now · Search · Library · Home, Settings on the right.
+        seg = (width - 4) // 4
+        for i, (key, label) in enumerate(TABS):
+            active = self.tab == key and not self.pages
+            sx = x + i * seg
+            if active:
+                c.put(y, sx, CAP_LEFT, white(0.16))
+                c.fill(y, sx + 1, seg - 2, white(0.16))
+                c.put(y, sx + seg - 1, CAP_RIGHT, white(0.16))
+            c.put(y, sx + (seg - len(label)) // 2, label, WHITE if active else white(0.6), bold=active)
+            c.click(y, sx, sx + seg, lambda k=key: self.set_tab(k))
+        gx = x + width - 2
+        on = self.tab == "settings"
+        c.put(y, gx, ICON["settings"], WHITE if on else white(0.6), bg=white(0.16) if on else None)
+        c.click(y, gx - 1, gx + 2, lambda: self.set_tab("settings"))
+
+    def draw_art(self, c, y, x, cols, rows, url, seed):
+        pixels = self.art.get(url, cols, rows)
+        if pixels:
+            for r, line in enumerate(pixels):
+                for col, (top, bottom) in enumerate(line):
+                    c.put(y + r, x + col, "▀", top, bg=bottom)
+            return
+        top, bottom = hue_colors(seed)
+        for r in range(rows):
+            t = r / max(1, rows - 1)
+            color = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom))
+            c.put(y + r, x, " " * cols, color, bg=color)
+
+    def track(self, c, y, x, width, fraction, knob=False, unity=0.0, dim=False):
+        """The design's slim track; returns the click handler's column → fraction."""
+        filled = round(width * max(0.0, min(1.0, fraction)))
+        for i in range(width):
+            if i < filled:
+                if unity and i >= round(width * unity):
+                    color = ACCENT
+                elif knob:  # progress: white gradient
+                    color = white(0.75 + 0.25 * i / max(1, width))
+                else:
+                    color = white(0.6)
+            else:
+                color = white(0.18)
+            if dim:
+                color = tuple(round(v * 0.55) for v in color)
+            c.put(y, x + i, "━", color)
+        if unity:
+            c.put(y, x + round(width * unity), "╋", white(0.45))
+        if knob:
+            c.put(y, x + min(width - 1, filled), "●", WHITE)
+
+    def box(self, c, y, x, width, height, label):
+        """The design's thin frame, its label in amber on the top edge."""
+        edge = white(0.18)
+        c.put(y, x, "┌" + "─" * (width - 2) + "┐", edge)
+        for r in range(y + 1, y + height - 1):
+            c.put(r, x, "│", edge)
+            c.put(r, x + width - 1, "│", edge)
+        c.put(y + height - 1, x, "└" + "─" * (width - 2) + "┘", edge)
+        c.put(y, x + 2, f" {label} ", ACCENT)
+
+    def draw_now(self, c, y, x, width, bottom):
+        """The design's terminal view: now playing, the queue, then a status line."""
+        song = self.song
+        if self.status != "ok" or not song:
+            if self.status == "idle":
+                c.put(y + 1, x, "Nothing playing — find something in Search (2) or Home (4).", white(0.45))
+            return
+        p = self.player
+        playing = not song.get("isPaused")
+        # Now playing.
+        self.box(c, y, x, width, 5, "now playing")
+        ix, iw = x + 2, width - 4
+        like = p.get("like")
+        flags = [("[S]" if p.get("shuffle") else "[ ]", "shuffle"),
+                 ({"ALL": "[R]", "ONE": "[1]"}.get(p.get("repeat"), "[ ]"), "repeat"),
+                 (" " + ICON["like" if like == "LIKE" else "likeOff"], "like")]
+        fx = ix + iw - sum(text_width(f) for f, _ in flags)
+        at = fx
+        for text, name in flags:
+            c.put(y + 1, at, text, ACCENT if name == "like" and like == "LIKE" else white(0.5))
+            c.click(y + 1, at, at + text_width(text), lambda n=name: self.action(n))
+            at += text_width(text)
+        title = ("▶ " if playing else "❚❚ ") + song.get("title", "")
+        c.put(y + 1, ix, clip(title, fx - ix - 2), WHITE, bold=True)
+        sub = "  " + " · ".join(v for v in (song.get("artist"), song.get("album")) if v)
+        c.put(y + 2, ix, clip(sub, iw), white(0.5))
+        duration = song.get("songDuration") or 0
+        elapsed = self.elapsed()
+        times = f"{clock(elapsed)}/{clock(duration)}"
+        bar = iw - len(times) - 2
+        filled = round(bar * elapsed / duration) if duration else 0
+        c.put(y + 3, ix, "━" * filled + ("╸" if filled < bar else ""), ACCENT)
+        if filled + 1 < bar:
+            c.put(y + 3, ix + filled + 1, "─" * (bar - filled - 1), white(0.2))
+        c.click(y + 3, ix, ix + bar, lambda col: self.action("seek", int(duration * (col - ix) / bar)), column=True)
+        c.put(y + 3, ix + iw - len(times), times, white(0.6))
+        y += 6
+        # The queue, numbered from the current song.
+        height = max(3, min(bottom - y - 1, len(p.get("queue", [])) + 2))
+        self.box(c, y, x, width, height, "queue")
+        self.draw_queue(c, y + 1, ix - 1, iw + 2, y + height - 1)
+        y += height + 1
+        # Status: volume, equalizer, sleep timer.
+        if y < bottom + 1:
+            muted = p.get("muted")
+            top = p.get("maxVolume") or 100
+            volume = p.get("volume", 0)
+            blocks = 0 if muted else round(10 * min(volume, top) / top)
+            label = "Muted" if muted else f"{round(volume)}%"
+            parts = [("vol ", None), ("█" * blocks + "░" * (10 - blocks), "volume"),
+                     (" " + label, "mute"), ("    eq ", None), (p.get("eq", "flat"), "eq"),
+                     ("    sleep ", None), (self.sleep_label().lower() or "off", "sleep")]
+            at = x
+            for text, name in parts:
+                color = white(0.5) if name is None or name == "mute" else INK
+                if name == "mute" and volume > 100 and not muted:
+                    color = ACCENT
+                c.put(y, at, text, color)
+                if name == "volume":
+                    c.click(y, at, at + 10, lambda col, a=at: self.action("volume", round(top * (col - a + 1) / 10)), column=True)
+                elif name == "mute":
+                    c.click(y, at, at + len(text), lambda: self.action("mute"))
+                elif name == "eq":
+                    c.click(y, at, at + len(text), self.cycle_eq)
+                elif name == "sleep":
+                    c.click(y, at, at + len(text), lambda: self.action("sleep", "off"))
+                at += text_width(text)
+
+    def draw_queue(self, c, y, x, width, bottom):
+        queue = self.player.get("queue", [])
+        if not queue:
+            c.put(y, x + 2, "Queue is empty", white(0.45))
+            return
+        view = self.view()
+        view["sel"] = max(0, min(view["sel"], len(queue) - 1))
+        height = bottom - y
+        if view["sel"] < view["scroll"]:
+            view["scroll"] = view["sel"]
+        elif view["sel"] >= view["scroll"] + height:
+            view["scroll"] = view["sel"] - height + 1
+        view["scroll"] = max(0, min(view["scroll"], max(0, len(queue) - height)))
+        start = next((i for i, q in enumerate(queue) if q.get("current")), 0)
+        playing = self.song and not self.song.get("isPaused")
+        entries = self.entries()
+        for row, i in enumerate(range(view["scroll"], min(len(queue), view["scroll"] + height))):
+            q, at = queue[i], y + row
+            current, selected = q.get("current"), i == view["sel"]
+            if selected:
+                c.fill(at, x, width, white(0.1))
+            color = ACCENT if current else (WHITE if selected else INK)
+            dim = white(0.7) if selected else white(0.4)
+            mark = ("▶" if playing else "❚") if current else ("›" if selected else "")
+            c.put(at, x + 1, mark, color)
+            c.put(at, x + 3, f"{i - start:02d}" if i >= start else "··", white(0.35))
+            length = q.get("length") or ""
+            artist_w = 18 if width > 60 else 12
+            c.put(at, x + width - 1 - len(length), length, dim)
+            ax = x + width - 1 - 6 - artist_w
+            c.put(at, ax, clip(q.get("artist", ""), artist_w), dim)
+            c.put(at, x + 7, clip(q.get("title", ""), ax - x - 9), color)
+            c.click(at, x, x + width, lambda n=i: self.click_entry(n, entries[n]))
+
+    def cycle_eq(self):
+        names = [name for name, _, _ in EQ]
+        current = self.player.get("eq", "flat")
+        self.action("eq", names[(names.index(current) + 1) % len(names)] if current in names else "flat")
+
+    def draw_search(self, c, y, x, width, bottom):
+        # The search box.
+        box = white(0.1) if self.typing else white(0.06)
+        c.put(y, x, CAP_LEFT, box)
+        c.fill(y, x + 1, width - 2, box)
+        c.put(y, x + width - 1, CAP_RIGHT, box)
+        c.put(y, x + 2, ICON["search"], white(0.45), bg=box)
+        if self.query:
+            shown = self.query[-(width - 8):]
+            end = c.put(y, x + 4, shown, WHITE, bg=box)
+        else:
+            end = c.put(y, x + 4, "Search YouTube Music", white(0.38), bg=box) if not self.typing else x + 4
+        if self.typing and int(time.time() * 2) % 2 == 0:
+            c.put(y, min(end, x + width - 2), "▏", ACCENT, bg=box)
+        c.click(y, x, x + width, lambda: setattr(self, "typing", True))
+        # Filter chips.
+        cx = x
+        for key, label in FILTERS:
+            on = self.filter == key
+            chip = f" {label} "
+            c.put(y + 2, cx, chip, WHITE if on else white(0.6), bg=white(0.14) if on else None, bold=on)
+            c.click(y + 2, cx, cx + len(chip), lambda k=key: self.set_filter(k))
+            cx += len(chip) + 1
+        y += 4
+        if self.query.strip():
+            if self.searched != self.filter + "\n" + self.query.strip():
+                c.put(y, x, "Searching…", white(0.45))
+            elif self.search_error:
+                c.put(y, x, clip(self.search_error, width), white(0.45))
+            elif not self.search_sections:
+                c.put(y, x, clip(f"No results for “{self.query.strip()}”", width), white(0.45))
+            else:
+                self.draw_list(c, y, x, width, bottom)
+
+    def set_filter(self, key):
+        self.filter = key
+        self.run_search()
+
+    def draw_page(self, c, y, x, width, bottom):
+        page = self.pages[-1]
+        self.draw_art(c, y, x, 12, 6, page.get("image"), page.get("title"))
+        tx, tw = x + 14, width - 14
+        c.put(y + 1, tx, clip(page.get("title", ""), tw), WHITE, bold=True)
+        c.put(y + 2, tx, clip(page.get("subtitle", ""), tw), white(0.45))
+        back = f" {ICON['back']} Back "
+        c.put(y + 4, tx, back, INK, bg=white(0.1))
+        c.click(y + 4, tx, tx + len(back), self.back)
+        if not page.get("loading") and not page.get("error"):
+            play = f" {ICON['play']} Play "
+            px = tx + len(back) + 2
+            c.put(y + 4, px, play, BLACK, bg=WHITE, bold=True)
+            c.click(y + 4, px, px + len(play), lambda: self.action("playall", page["type"], page["id"]))
+        y += 7
+        if page.get("loading"):
+            c.put(y, x, "Loading…", white(0.45))
+        elif page.get("error"):
+            c.put(y, x, clip(page["error"], width), white(0.45))
+        else:
+            self.draw_list(c, y, x, width, bottom)
+
+    def draw_list(self, c, y, x, width, bottom, headers=True):
+        """Sections of two-line rows, scrolled so the selection stays in view."""
+        blocks = []  # (kind, payload, height)
+        index = 0
+        for section in self.sections():
+            if headers:
+                blocks.append(("header", section["title"], 2 if blocks else 1))
+            for item in section["items"]:
+                blocks.append(("entry", (item, index), 2))
+                index += 1
+        if not blocks:
+            if self.tab == "now" and not self.pages:
+                c.put(y + 1, x, "Queue is empty", white(0.45))
+            return
+        view = self.view()
+        view["sel"] = max(0, min(view["sel"], index - 1))
+        # Keep the selected row on screen.
+        tops, at = [], 0
+        for block in blocks:
+            tops.append(at)
+            at += block[2]
+        height = bottom - y
+        sel_block = next(i for i, b in enumerate(blocks) if b[0] == "entry" and b[1][1] == view["sel"])
+        if tops[sel_block] < view["scroll"]:
+            view["scroll"] = tops[sel_block] - (1 if sel_block and blocks[sel_block - 1][0] == "header" else 0)
+        elif tops[sel_block] + 2 > view["scroll"] + height:
+            view["scroll"] = tops[sel_block] + 2 - height
+        view["scroll"] = max(0, min(view["scroll"], max(0, at - height)))
+        for block, top in zip(blocks, tops):
+            row = y + top - view["scroll"]
+            if row + block[2] <= y or row >= bottom:
+                continue
+            if block[0] == "header":
+                c.put(row + block[2] - 1, x, block[1].upper(), white(0.45), bold=True)
+            else:
+                self.draw_entry(c, row, x, width, *block[1], bottom=bottom, top=y)
+
+    def draw_entry(self, c, y, x, width, item, index, bottom, top):
+        selected = self.view()["sel"] == index
+        kind = item["type"]
+        playable = kind in ("song", "video")
+        current = item.get("current") if kind == "queue" else (
+            playable and self.song and self.song.get("videoId") == item["id"])
+        bg = white(0.1) if selected else (white(0.06) if kind == "queue" and current else None)
+        for r in range(2):
+            if top <= y + r < bottom and bg:
+                c.fill(y + r, x - 1, width + 2, bg)
+        if y >= top and y + 1 < bottom:
+            self.draw_art(c, y, x, 4, 2, item.get("image"), item.get("title"))
+        tw = width - 6 - 8
+        if top <= y < bottom:
+            c.put(y, x + 6, clip(item.get("title", ""), tw), ACCENT if current else white(0.92), bold=selected)
+        if top <= y + 1 < bottom:
+            c.put(y + 1, x + 6, clip(item.get("subtitle", ""), tw), white(0.45))
+        if top <= y < bottom:
+            if kind == "queue" and selected and not current:
+                hint = f"{ICON['up']} u  {ICON['close']} x"
+                c.put(y, x + width - text_width(hint), hint, white(0.7))
+            elif playable or kind == "queue":
+                length = item.get("length") or ""
+                c.put(y, x + width - len(length), length, white(0.4))
+            else:
+                c.put(y, x + width - 1, ICON["chevron"], white(0.35))
+        for r in range(2):
+            if top <= y + r < bottom:
+                c.click(y + r, x - 1, x + width + 1, lambda i=index, it=item: self.click_entry(i, it))
+
+    def click_entry(self, index, item):
+        view = self.view()
+        if view["sel"] == index:
+            self.activate(item)
+        view["sel"] = index
+
+    def draw_settings(self, c, y, x, width, bottom):
+        p = self.player
+        rows = []  # y of each focusable settings row, for the cursor mark
+        # Sleep timer.
+        sleep = p.get("sleep")
+        status = "" if not sleep else ("Stops after this song" if sleep["mode"] == "end" else "Pauses in " + self.sleep_label())
+        c.put(y, x, "SLEEP TIMER", white(0.45), bold=True)
+        c.put(y, x + width - len(status), status, ACCENT)
+        cx = x
+        for i, (value, label) in enumerate(SLEEP):
+            on = (not sleep and value == "off") or (sleep and (sleep["mode"] == "end" and value == "end"
+                                                               or str(sleep.get("minutes")) == value))
+            focus = self.settings_row == 0 and self.settings_col[0] == i
+            chip = f" {label} "
+            c.put(y + 1, cx, chip, BLACK if on else (WHITE if focus else white(0.8)),
+                  bg=ACCENT if on else (white(0.16) if focus else white(0.06)), bold=on)
+            c.click(y + 1, cx, cx + len(chip), lambda v=value: self.action("sleep", v))
+            cx += len(chip) + 1
+        rows.append(y + 1)
+        y += 3
+        # Equalizer: three per row, each with its five bars.
+        c.put(y, x, "EQUALIZER", white(0.45), bold=True)
+        cell = width // 3
+        for i, (value, label, gains) in enumerate(EQ):
+            ex, ey = x + (i % 3) * cell, y + 1 + (i // 3) * 2
+            on = p.get("eq") == value
+            focus = self.settings_row == 1 and self.settings_col[1] == i
+            bars = "".join(BARS[max(1, min(8, 3 + g))] for g in gains)
+            c.put(ey, ex, bars, ACCENT if on else white(0.4))
+            c.put(ey, ex + 6, label, WHITE if on or focus else white(0.75), bg=white(0.16) if focus else None, bold=on)
+            c.click(ey, ex, ex + cell - 1, lambda v=value: self.action("eq", v))
+        rows.append(y + 1)
+        y += 6
+        # Volume boost.
+        c.put(y, x, "VOLUME", white(0.45), bold=True)
+        boost = p.get("boost")
+        focus = self.settings_row == 2
+        c.put(y + 1, x, "Volume boost", WHITE if focus else INK, bold=focus)
+        c.put(y + 2, x, "Allow up to 150%. May distort loud tracks.", white(0.45))
+        switch = "   ●" if boost else "●   "
+        sx = x + width - 6
+        c.put(y + 1, sx, CAP_LEFT, ACCENT if boost else white(0.2))
+        c.put(y + 1, sx + 1, switch, WHITE, bg=ACCENT if boost else white(0.2))
+        c.put(y + 1, sx + 5, CAP_RIGHT, ACCENT if boost else white(0.2))
+        c.click(y + 1, x, x + width, lambda: self.action("boost"))
+        rows.append(y + 1)
+        y += 4
+        # Account.
+        c.put(y, x, "ACCOUNT", white(0.45), bold=True)
+        focus = self.settings_row == 3
+        if self.account.get("loggedIn"):
+            c.put(y + 1, x, ICON["account"] + "  " + clip(self.account.get("name") or "Logged in", width - 16), INK)
+            button = " Log out "
+        else:
+            if self.player.get("signingIn"):
+                note = "Finish signing in in the browser window — it closes by itself."
+            elif self.account.get("expired"):
+                note = "YouTube ended this login — sign in again."
+            else:
+                note = "Not logged in — likes, Library and a personal Home need it. h: paste headers instead"
+            c.put(y + 1, x, clip(note, width), white(0.45))
+            button = " Waiting for Google… " if self.player.get("signingIn") else " Sign in with Google "
+        bx = x + width - len(button)
+        c.put(y + 2 if not self.account.get("loggedIn") else y + 1, bx, button,
+              BLACK if focus else INK, bg=WHITE if focus else white(0.1), bold=focus)
+        c.click(y + 1, x, x + width, self.account_button)
+        c.click(y + 2, x, x + width, self.account_button)
+        rows.append(y + 1)
+        c.put(rows[self.settings_row], x - 1, "▌", ACCENT)
+
+    def account_button(self):
+        if self.account.get("loggedIn"):
+            def go():
+                call("logout")
+                self.account = {"loggedIn": False, "name": ""}
+                self.home = self.library = None
+                self.refresh()
+            self.run_bg(go)
+        elif not self.player.get("signingIn"):
+            self.action("signin")
+
+    def hints(self):
+        if self.pages:
+            return [("↑↓", "move"), ("⏎", "play/open"), ("a", "play next"), ("p", "play all"),
+                    ("esc", "back"), ("q", "quit")]
+        if self.tab == "now":
+            return [("␣", "play"), ("n/p", "next/prev"), ("j/k", "select"), ("⏎", "play sel"),
+                    ("J/K", "move"), ("d", "remove"), ("+/-", "vol"), ("m", "mute"), ("s", "shuffle"),
+                    ("r", "repeat"), ("l", "like"), ("e", "eq"), ("q", "quit"), ("u", "up next"),
+                    ("←/→", "seek"), ("D", "dislike"), ("tab", "tabs")]
+        if self.tab == "search" and self.typing:
+            return [("type", "to search"), ("tab", "filter"), ("↓", "results"), ("esc", "clear/leave")]
+        if self.tab == "settings":
+            return [("↑↓", "section"), ("←/→", "choose"), ("⏎", "apply"), ("1-4", "tabs"), ("q", "quit")]
+        return [("j/k", "move"), ("⏎", "play/open"), ("a", "play next"), ("/", "search"), ("1-4", "tabs"),
+                (",", "settings"), ("q", "quit")]
+
+    @staticmethod
+    def layout_hints(hints, width):
+        """Wrap the hints onto at most two lines."""
+        lines, line, used = [[]], 0, 0
+        for key, label in hints:
+            w = text_width(key) + 1 + text_width(label)
+            if used and used + 2 + w > width:
+                if len(lines) == 2:
+                    break
+                lines.append([])
+                used = 0
+            lines[-1].append((key, label))
+            used += w + (2 if used else 0)
+        return lines
+
+    # ---- Input.
+
+    def back(self):
+        if self.pages:
+            self.pages.pop()
+
+    def move(self, step):
+        if self.tab == "settings" and not self.pages:
+            self.settings_row = max(0, min(3, self.settings_row + step))
+            return
+        entries = self.entries()
+        if entries:
+            view = self.view()
+            view["sel"] = max(0, min(len(entries) - 1, view["sel"] + step))
+
+    def key(self, k):
+        self.message = "" if k not in ("l", "d") else self.message
+        if self.tab == "search" and self.typing and not self.pages:
+            return self.search_key(k)
+        if k in ("q", "ctrl-c"):
+            self.running = False
+        elif self.status == "offline" and k == "enter":
+            self.start_service()
+        elif k in ("1", "2", "3", "4"):
+            self.set_tab(TABS[int(k) - 1][0])
+        elif k == ",":
+            self.set_tab("settings")
+        elif k == "tab" or k == "shift-tab":
+            order = [t for t, _ in TABS] + ["settings"]
+            at = order.index(self.tab) if self.tab in order else 0
+            self.set_tab(order[(at + (1 if k == "tab" else -1)) % len(order)])
+        elif k == "/":
+            self.set_tab("search")
+        elif k in ("esc", "backspace"):
+            self.back()
+        elif k in ("up", "k"):
+            self.move(-1)
+        elif k in ("down", "j"):
+            self.move(1)
+        elif k == "pageup":
+            self.move(-8)
+        elif k == "pagedown":
+            self.move(8)
+        elif self.tab == "settings" and not self.pages:
+            self.settings_key(k)
+        elif k == "enter":
+            item = self.selected()
+            if item:
+                self.activate(item)
+        elif k == " ":
+            self.action("toggle")
+        elif k == "n":
+            self.action("next")
+        elif k == "p":
+            if self.pages and not self.pages[-1].get("loading"):
+                self.action("playall", self.pages[-1]["type"], self.pages[-1]["id"])
+            else:
+                self.action("previous")
+        elif k in ("left", "right") and self.song:
+            self.action("seek", max(0, int(self.elapsed()) + (5 if k == "right" else -5)))
+        elif k in ("+", "="):
+            self.action("volume", self.player.get("volume", 0) + 5)
+        elif k in ("-", "_"):
+            self.action("volume", max(0, self.player.get("volume", 0) - 5))
+        elif k == "m":
+            self.action("mute")
+        elif k == "s":
+            self.action("shuffle")
+        elif k == "r":
+            self.action("repeat")
+        elif k == "l":
+            self.action("like")
+        elif k == "D" or (k == "d" and self.tab != "now"):
+            self.action("dislike")
+        elif k == "e":
+            self.cycle_eq()
+        elif k == "a":
+            item = self.selected()
+            if item and item["type"] in ("song", "video"):
+                self.action("add", item["id"])
+        elif self.tab == "now" and not self.pages:
+            self.queue_key(k)
+
+    def queue_key(self, k):
+        item = self.selected()
+        queue = self.player.get("queue", [])
+        if not item or item.get("current") or not queue:
+            return
+        index, first, last = item["index"], queue[0]["index"] + 1, queue[-1]["index"]
+        view = self.view()
+        if k in ("x", "d"):
+            self.action("remove", index)
+        elif k == "u":
+            self.action("playnext", index)
+        elif k == "J" and index < last:
+            self.action("move", index, index + 1)
+            view["sel"] += 1
+        elif k == "K" and index > first:
+            self.action("move", index, index - 1)
+            view["sel"] -= 1
+
+    def settings_key(self, k):
+        row = self.settings_row
+        if row in (0, 1) and k in ("left", "right", "h", "l"):
+            count = len(SLEEP) if row == 0 else len(EQ)
+            step = 1 if k in ("right", "l") else -1
+            self.settings_col[row] = (self.settings_col[row] + step) % count
+        elif k in ("enter", " "):
+            if row == 0:
+                self.action("sleep", SLEEP[self.settings_col[0]][0])
+            elif row == 1:
+                self.action("eq", EQ[self.settings_col[1]][0])
+            elif row == 2:
+                self.action("boost")
+            else:
+                self.account_button()
+        elif k == "h" and row == 3 and not self.account.get("loggedIn"):
+            self.login = True  # pasting headers needs the plain terminal
+
+    def search_key(self, k):
+        if k == "ctrl-c":
+            self.running = False
+        elif k == "esc":
+            if self.query:
+                self.query, self.searched, self.search_sections = "", "", []
+            else:
+                self.typing = False
+        elif k == "enter":
+            self.search_due = 0
+            self.run_search()
+            if self.search_sections:
+                self.typing = False
+        elif k == "down":
+            self.typing = False
+        elif k in ("tab", "shift-tab"):
+            keys = [f for f, _ in FILTERS]
+            at = keys.index(self.filter)
+            self.set_filter(keys[(at + (1 if k == "tab" else -1)) % len(keys)])
+        elif k == "backspace":
+            self.query = self.query[:-1]
+            self.search_due = time.time() + 0.35
+        elif len(k) == 1 and k.isprintable():
+            self.query += k
+            self.search_due = time.time() + 0.35
+
+    def mouse(self, button, x, y, pressed):
+        if not pressed:
+            return
+        if button in (64, 65):  # wheel
+            self.move(-1 if button == 64 else 1)
+            return
+        if button != 0 or not self.canvas:
+            return
+        for cy, x0, x1, action, column in reversed(self.canvas.clicks):
+            if cy == y and x0 <= x < x1:
+                if self.tab == "search" and not self.pages and y > 5:
+                    self.typing = False
+                action(x) if column else action()
+                return
+
+
+# ---- The terminal.
+
+def read_keys(data):
+    """Split raw input into key names, text and mouse events."""
+    keys, i = [], 0
+    names = {"[A": "up", "[B": "down", "[C": "right", "[D": "left", "[Z": "shift-tab",
+             "[5~": "pageup", "[6~": "pagedown", "[H": "home", "[F": "end", "[3~": "delete"}
+    while i < len(data):
+        ch = data[i]
+        if ch == "\x1b":
+            if data.startswith("\x1b[<", i):  # SGR mouse: ESC [ < b ; x ; y (M|m)
+                end = i + 3
+                while end < len(data) and data[end] not in "Mm":
+                    end += 1
+                try:
+                    b, x, y = (int(v) for v in data[i + 3:end].split(";"))
+                    keys.append(("mouse", b, x - 1, y - 1, data[end] == "M"))
+                except ValueError:
+                    pass
+                i = end + 1
+                continue
+            for seq, name in names.items():
+                if data.startswith(seq, i + 1):
+                    keys.append(name)
+                    i += 1 + len(seq)
+                    break
+            else:
+                if data.startswith("[", i + 1) or data.startswith("O", i + 1):
+                    i += 3  # an unknown sequence: skip it
+                else:
+                    keys.append("esc")
+                    i += 1
+            continue
+        keys.append({"\r": "enter", "\n": "enter", "\t": "tab", "\x7f": "backspace", "\x08": "backspace",
+                     "\x03": "ctrl-c"}.get(ch, ch))
+        i += 1
+    return keys
+
+
+ENTER_SCREEN = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h"
+LEAVE_SCREEN = "\x1b[?1000l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l"
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if not sys.stdin.isatty():
+        print("ytm-tui needs a terminal", file=sys.stderr)
+        return 1
+    app = App()
+    app.login = False
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    signal.signal(signal.SIGWINCH, lambda *_: app.dirty.set())
+    threading.Thread(target=app.poll, daemon=True).start()
+    out = sys.stdout
+
+    def enter():
+        tty.setraw(fd)
+        out.write(ENTER_SCREEN)
+        out.flush()
+
+    def leave():
+        out.write(LEAVE_SCREEN)
+        out.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+    enter()
+    try:
+        last = 0.0
+        while app.running:
+            if app.login:  # logging in needs the plain terminal for pasting
+                app.login = False
+                leave()
+                subprocess.run([CLI, "login"])
+                input("\nPress Enter to go back to the player…")
+                app.load_account()
+                app.home = app.library = None
+                enter()
+                app.dirty.set()
+            if app.search_due and time.time() >= app.search_due:
+                app.search_due = 0
+                app.run_search()
+            now = time.time()
+            # Redraw on changes, and a few times a second for the progress bar.
+            if app.dirty.is_set() or now - last > 0.25:
+                app.dirty.clear()
+                cols, rows = shutil.get_terminal_size()
+                with app.lock:
+                    out.write(app.draw(cols, rows).render())
+                out.flush()
+                last = now
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                data = os.read(fd, 4096).decode("utf-8", "ignore")
+                for key in read_keys(data):
+                    if isinstance(key, tuple):
+                        app.mouse(*key[1:])
+                    else:
+                        app.key(key)
+                app.dirty.set()
+    finally:
+        app.running = False
+        leave()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

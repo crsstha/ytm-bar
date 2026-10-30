@@ -71,6 +71,9 @@ BarWidget {
     text: panelLoader.item ? panelLoader.item.label : ""
     // With a song loaded, draw the wave + title (below) in place of the label.
     labelVisible: !root.showWave
+    // The pill fits the title. It lives in the bar's right section (see
+    // install.sh): there a width change only moves its own left edge, while in
+    // the centred middle section it would re-centre the clock.
     fixedWidth: root.showWave ? waveRow.implicitWidth + 18 + scaledHorizontalMargin * 2 : -1
 
     // The design's pill: a soft glass capsule around the wave and title.
