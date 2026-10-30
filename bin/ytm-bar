@@ -529,6 +529,7 @@ class Player:
         self._account = (None, None)  # (auth, info)
         self._signin = None  # the sign-in window's process, while it's watched
         self._session = ""  # what session.json holds
+        self._resuming = None  # (videoId, position) until the restored song has loaded
         self._colors = {}  # cover URL -> cover_color(), "" while it's worked out
         self._saved = (0.0, set())  # (time, ids of the playlists in your library)
         self._browse = (0.0, None, None)  # (time, auth, sections) for moods and genres
@@ -705,10 +706,21 @@ class Player:
             "album": track["album"],
             "imageSrc": track["image"],
             "songDuration": mpv.get("duration", 0) or track["duration"],
-            "elapsedSeconds": mpv.get("time-pos", 0),
+            "elapsedSeconds": self.elapsed(track["videoId"], mpv),
             "isPaused": mpv.get("pause", False),
             "color": self.color_of(track["image"]),
         }
+
+    def elapsed(self, video_id, mpv):
+        """The position; right after a resume, the saved one until mpv has
+        loaded the song (it reports 0 meanwhile)."""
+        position = mpv.get("time-pos", 0) or 0
+        resuming = self._resuming
+        if resuming:
+            if resuming[0] == video_id and position < 0.5:
+                return resuming[1]
+            self._resuming = None
+        return position
 
     def color_of(self, url):
         """The cover's colour; worked out in the background, "" until then."""
@@ -1314,6 +1326,7 @@ class Player:
                 options = f"start={position}" if i == index else ""
                 mpv.command("loadfile", WATCH_URL + video_id, "append", -1, options)
             mpv.set("playlist-pos", index)
+            self._resuming = (ids[index], position)
         self._session = ""
 
     # -- Editing the queue (indexes are mpv playlist positions).
