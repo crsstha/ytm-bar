@@ -126,6 +126,7 @@ ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
 - Fonts: [Geist](https://github.com/vercel/geist-font), under the SIL Open Font
   License (`fonts/OFL.txt`).
 - Tests: `python3 tests/test_cli.py`.
+- Built by crsstha with [Claude](https://claude.ai) (Anthropic) as co-author.
 
 ## Remove
 
