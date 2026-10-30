@@ -28,6 +28,7 @@ unlink_if_ours "$HOME/.config/systemd/user/ytm-bar.service"
 systemctl --user daemon-reload || true
 unlink_if_ours "$HOME/.local/bin/ytm-bar"
 unlink_if_ours "$HOME/.local/bin/ytm-tui"
+unlink_if_ours "$HOME/.local/bin/ytm-panel"
 
 if command -v omarchy >/dev/null 2>&1; then
   omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || true
@@ -36,6 +37,8 @@ fi
 remove_block "$HOME/.config/hypr/bindings.lua"
 remove_block "$HOME/.config/hypr/autostart.lua"
 hyprctl reload >/dev/null 2>&1 || true
+remove_block "$(readlink -f "$HOME/.config/i3/config")"
+i3-msg reload >/dev/null 2>&1 || true
 
 rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ytm-bar"
 if (( purge )); then

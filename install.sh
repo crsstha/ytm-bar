@@ -1,9 +1,12 @@
 #!/bin/bash
-# Install ytm-bar: the YouTube Music widget for the Omarchy bar.
+# Install ytm-bar: the YouTube Music widget for the Omarchy bar, or for
+# polybar on i3 (Arch).
 #
 #   ./install.sh                install, put the widget first in the bar's right
 #                               section, start the player service and add the
-#                               keybinding
+#                               keybinding (auto-detects Omarchy or i3)
+#   ./install.sh --omarchy      force the Omarchy front end
+#   ./install.sh --i3           force the i3 + polybar front end
 #   ./install.sh --no-bindings  skip the keybinding
 #
 # Safe to run again: links are refreshed and config blocks (between "ytm-bar"
@@ -17,20 +20,27 @@ BIN="$HOME/.local/bin"
 UNITS="$HOME/.config/systemd/user"
 PACKAGES=(mpv yt-dlp python-ytmusicapi mpv-mpris)
 
+frontend=""
 bindings=1
 for arg in "$@"; do
   case "$arg" in
+    --omarchy) frontend=omarchy ;;
+    --i3) frontend=i3 ;;
     --no-bindings) bindings=0 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
-if ! command -v omarchy-shell >/dev/null 2>&1; then
-  echo "This plugin needs Omarchy (omarchy-shell not found)." >&2
-  exit 1
+if [[ -z $frontend ]]; then
+  if command -v omarchy-shell >/dev/null 2>&1; then frontend=omarchy
+  elif [[ ${XDG_CURRENT_DESKTOP:-} == *i3* ]] || pgrep -x i3 >/dev/null 2>&1; then frontend=i3
+  else
+    echo "Couldn't detect Omarchy or i3 — pass --omarchy or --i3." >&2
+    exit 1
+  fi
 fi
-echo "==> Installing $NAME from $REPO"
+echo "==> Installing $NAME ($frontend front end) from $REPO"
 
 link() {  # link SOURCE TARGET — replace an existing link, back up a real file
   local src=$1 dst=$2
@@ -65,7 +75,7 @@ remove_block() {
   echo "    removed the old ytm-bar block from $target"
 }
 
-chmod +x "$REPO/bin/"*
+chmod +x "$REPO/bin/"* "$REPO/i3/ytm-panel"
 
 echo "--> Packages"
 missing=()
@@ -73,7 +83,11 @@ for pkg in "${PACKAGES[@]}"; do
   pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
 done
 if (( ${#missing[@]} )); then
-  echo "    ! missing: ${missing[*]} — run: omarchy pkg add ${missing[*]}"
+  if [[ $frontend == omarchy ]]; then
+    echo "    ! missing: ${missing[*]} — run: omarchy pkg add ${missing[*]}"
+  else
+    echo "    ! missing: ${missing[*]} — run: sudo pacman -S ${missing[*]}"
+  fi
 else
   echo "    mpv, yt-dlp, ytmusicapi and mpv-mpris are installed"
 fi
@@ -92,6 +106,38 @@ if systemctl --user is-active --quiet ytm-bar.service; then
 else
   systemctl --user start ytm-bar.service
   echo "    ytm-bar.service enabled and started"
+fi
+
+if [[ $frontend == i3 ]]; then
+  echo "--> i3 front end"
+  link "$REPO/i3/ytm-panel" "$BIN/ytm-panel"
+  if (( bindings )); then
+    # Resolved: sed -i on a symlinked (dotfiles) config would replace the link
+    add_block "$REPO/i3/i3.config" "$(readlink -f "$HOME/.config/i3/config")"
+    i3-msg reload >/dev/null 2>&1 || true
+  fi
+  python3 -c 'import gi; gi.require_version("WebKit2", "4.1")' 2>/dev/null \
+    || echo "    ! the popup needs WebKitGTK: sudo pacman -S webkit2gtk-4.1 python-gobject"
+  command -v kitty >/dev/null 2>&1 || command -v alacritty >/dev/null 2>&1 \
+    || echo "    ! Open in TUI needs kitty or alacritty (sudo pacman -S kitty)"
+  polybar_ini="$(readlink -f "$HOME/.config/polybar/config.ini" 2>/dev/null || true)"
+  if [[ -f $polybar_ini ]] && grep -rqs '^\[module/ytm\]' "$(dirname "$polybar_ini")"; then
+    echo "    polybar module already in $polybar_ini"
+  else
+    cat <<EOF
+    Add the bar module yourself:
+      polybar: $REPO/i3/polybar.ini  → then add "ytm" to modules-right
+    Then restart polybar (polybar-msg cmd restart).
+EOF
+  fi
+  echo "--> Account"
+  if [[ -s $HOME/.config/ytm-bar/browser.json ]]; then
+    echo "    logged in — 'ytm-bar logout' to forget it"
+  else
+    echo "    not logged in: search and radio work; run 'ytm-bar signin' to like songs"
+  fi
+  echo "==> Done"
+  exit 0
 fi
 
 echo "--> Omarchy bar plugin ($PLUGIN_ID)"

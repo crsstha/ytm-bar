@@ -1,6 +1,6 @@
 # ytm-bar
 
-YouTube Music in the [Omarchy](https://omarchy.org/) bar — no app, no browser tab.
+YouTube Music in the [Omarchy](https://omarchy.org/) bar — or polybar on i3 — no app, no browser tab.
 
 <img src="docs/pill.png" alt="The now-playing pill in the bar" height="26">
 
@@ -29,6 +29,20 @@ The installer links the `ytm-bar` and `ytm-tui` commands, enables
 **Log in (optional)** — for likes, your library and a personal home page:
 ⚙ Settings → **Sign in with Google**. A browser window opens; sign in and it
 closes by itself. No Chromium? Use **Paste headers** instead.
+
+### On i3 + polybar (Arch)
+
+```bash
+sudo pacman -S mpv yt-dlp python-ytmusicapi mpv-mpris webkit2gtk-4.1
+./install.sh --i3       # auto-detected on i3; --no-bindings to skip Super+Alt+M
+```
+
+Then add [`i3/polybar.ini`](i3/polybar.ini) to your polybar config, put `ytm`
+in `modules-right` and restart polybar (`polybar-msg cmd restart`). The pill
+and popup are the Omarchy ones: `i3/panel.html` is a port of `Panel.qml`, shown
+by `ytm-panel` in a WebKit window (needs `webkit2gtk-4.1`) at the top right.
+The bar's clicks, scroll and `Super+Alt+M` work as below. For the glass look,
+turn up picom's blur (`blur-method = "dual_kawase"`).
 
 ## Use
 
