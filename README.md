@@ -71,8 +71,10 @@ seconds. No Chromium? Use **Paste headers** instead.
   For you), **Save** adds it to Saved.
 - **⚙ Settings** — sleep timer, equalizer, volume boost, **Open in TUI**, account.
 
-Media keys work too. After a restart or reboot your queue comes back, paused
-where you left it.
+Media keys work too. When another app plays sound — a video, a call — the
+music pauses, and carries on once it stops (Settings → **Pause for other
+sounds**, or `ytm-bar autopause`). After a restart or reboot your queue comes
+back, paused where you left it.
 
 ### In a terminal
 

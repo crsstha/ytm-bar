@@ -2739,6 +2739,63 @@ Panel {
               }
             }
 
+            // ---- Auto-pause: another app's sound pauses the music (bin/ytm-bar).
+            Rectangle {
+              width: parent.width
+              height: autoPauseText.implicitHeight + 20
+              radius: 12
+              color: autoPauseArea.containsMouse ? root.white(0.07) : root.white(0.04)
+              border.width: 1
+              border.color: root.white(0.08)
+
+              Column {
+                id: autoPauseText
+                x: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - 24 - 36 - 12
+                spacing: 2
+
+                Label { text: "Pause for other sounds"; weight: Font.Medium }
+                Label {
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  elide: Text.ElideNone
+                  text: root.player.pausedForOther
+                    ? "Paused while another app plays — carries on when it stops."
+                    : "Pause when another app plays sound, and carry on after."
+                  font.pixelSize: 12
+                  color: root.player.pausedForOther ? root.accent : root.white(0.45)
+                }
+              }
+              Rectangle {
+                anchors.right: parent.right
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: 36
+                height: 20
+                radius: 10
+                color: root.player.autoPause !== false ? root.accent : root.white(0.15)
+
+                Rectangle {
+                  x: root.player.autoPause !== false ? 18 : 2
+                  y: 2
+                  width: 16
+                  height: 16
+                  radius: 8
+                  color: "#ffffff"
+
+                  Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                }
+              }
+              MouseArea {
+                id: autoPauseArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.action("autopause")
+              }
+            }
+
             // ---- Interface: the same player full-screen in a terminal (bin/ytm-tui).
             Item { width: 1; height: 10 }
             SectionHeader { text: "Interface" }

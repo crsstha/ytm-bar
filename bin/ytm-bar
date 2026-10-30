@@ -20,6 +20,7 @@ browsing and radio, mpv + yt-dlp for the audio.
   ytm-bar seek SECONDS    Jump to a position in the current song.
   ytm-bar volume PERCENT  Set the volume (0-100, or 0-150 with boost).
   ytm-bar mute | boost    Toggle mute / volume boost (up to 150%).
+  ytm-bar autopause       Toggle pausing while other apps play sound.
   ytm-bar eq PRESET       flat, bass, vocal, treble, loudness or night.
   ytm-bar sleep MINUTES|end|off
                           Pause after MINUTES of playing, or when this song ends.
@@ -145,7 +146,7 @@ USAGE = {
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
             "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout", "stats",
             "playlists", "browse", "recent", "recentclear",
-            "mute", "boost", *USAGE}
+            "mute", "boost", "autopause", *USAGE}
 
 # Equalizer presets: gains in dB for five bands, as in the design.
 EQ_BANDS = (60, 230, 910, 3600, 14000)
@@ -158,6 +159,11 @@ EQ_PRESETS = {
     "night": (-1, 0, 2, 1, -1),
 }
 BOOST_MAX = 150  # volume % allowed with boost on
+# Auto-pause: another app's sound pauses the music, which carries on after it.
+AUDIO_CLIENT = "ytm-bar"  # mpv's application.name, to tell its stream from others
+OTHER_SOUND_PAUSE = 1.0  # seconds another app must play before the music pauses
+OTHER_SOUND_RESUME = 2.0  # seconds of quiet before it carries on
+IGNORED_ROLES = {"event", "notification", "a11y", "accessibility"}
 
 
 def eq_filter(name):
@@ -438,6 +444,29 @@ def window_title(pid):
         return ""
 
 
+def other_sound_playing():
+    """Whether an app other than this player is playing sound right now:
+    an uncorked, unmuted, audible stream (PipeWire/PulseAudio, via pactl),
+    not counting notification and other event sounds."""
+    try:
+        out = subprocess.run(["pactl", "-f", "json", "list", "sink-inputs"],
+                             capture_output=True, text=True, timeout=3).stdout
+        streams = json.loads(out or "[]")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    for stream in streams:
+        props = stream.get("properties") or {}
+        if props.get("application.name") == AUDIO_CLIENT or stream.get("corked") or stream.get("mute"):
+            continue
+        if (props.get("media.role") or "").lower() in IGNORED_ROLES:
+            continue
+        levels = [str(c.get("value_percent", "0")).rstrip("%") for c in (stream.get("volume") or {}).values()]
+        if levels and all(level in ("0", "0.0") for level in levels):
+            continue
+        return True
+    return False
+
+
 def video_id_of(url):
     match = re.search(r"[?&]v=([\w-]{11})", url or "")
     return match.group(1) if match else None
@@ -459,6 +488,7 @@ class Mpv:
             "mpv", "--idle=yes", "--no-video", "--no-terminal", "--audio-display=no",
             f"--input-ipc-server={MPV_SOCKET}", "--ytdl-format=bestaudio/best",
             "--prefetch-playlist=yes", f"--volume={volume}", f"--volume-max={BOOST_MAX}",
+            f"--audio-client-name={AUDIO_CLIENT}",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 10
         while True:
@@ -552,6 +582,11 @@ class Player:
         self.eq = "flat"
         self.boost = False
         self.muted = False
+        # Auto-pause: on by default; whether it paused the music, and timers.
+        self.auto_pause = True
+        self.paused_for_other = False
+        self._other_since = None
+        self._quiet_since = None
         # Sleep timer: {"mode": "min", "left": seconds, "minutes": n} counts down
         # while playing; {"mode": "end"} pauses when the current song ends.
         self.sleep = None
@@ -574,6 +609,7 @@ class Player:
             self.volume = int(saved.get("volume", self.volume))
             self.eq = saved.get("eq") if saved.get("eq") in EQ_PRESETS else self.eq
             self.boost = bool(saved.get("boost", False))
+            self.auto_pause = bool(saved.get("autoPause", True))
             self.recent_searches = [q for q in saved.get("recent", []) if isinstance(q, str)][:RECENT_LIMIT]
         except (OSError, ValueError, AttributeError):
             pass
@@ -587,7 +623,7 @@ class Player:
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost,
-                                              "recent": self.recent_searches}))
+                                              "autoPause": self.auto_pause, "recent": self.recent_searches}))
         except OSError:
             pass
 
@@ -794,6 +830,8 @@ class Player:
             "volume": self.volume,
             "maxVolume": self.max_volume,
             "boost": self.boost,
+            "autoPause": self.auto_pause,
+            "pausedForOther": self.paused_for_other,
             "eq": self.eq,
             "sleep": dict(sleep) if sleep else None,
             "muted": self.muted,
@@ -1197,7 +1235,48 @@ class Player:
 
     def toggle(self, args):
         if self.current()[0] is not None:
+            self.paused_for_other = False  # your choice wins over auto-pause
             self.mpv.command("cycle", "pause")
+
+    def autopause(self, args):
+        self.auto_pause = not self.auto_pause
+        if not self.auto_pause and self.paused_for_other:
+            self.paused_for_other = False
+            self.mpv.set("pause", False)
+        self.save()
+        return {"autoPause": self.auto_pause}
+
+    def check_other_sound(self):
+        """Pause while another app plays sound; carry on once it has stopped,
+        if it was this that paused."""
+        if not self.auto_pause:
+            return
+        track, mpv = self.current()
+        if track is None:
+            self.paused_for_other = False
+            return
+        now = time.monotonic()
+        if other_sound_playing():
+            self._quiet_since = None
+            if mpv.get("pause", False):
+                return
+            self._other_since = self._other_since or now
+            if now - self._other_since >= OTHER_SOUND_PAUSE:
+                mpv.set("pause", True)
+                self.paused_for_other = True
+                self._other_since = None
+        else:
+            self._other_since = None
+            if not self.paused_for_other:
+                return
+            if not mpv.get("pause", False):  # you pressed play meanwhile
+                self.paused_for_other = False
+                return
+            self._quiet_since = self._quiet_since or now
+            if now - self._quiet_since >= OTHER_SOUND_RESUME:
+                mpv.set("pause", False)
+                self.paused_for_other = False
+                self._quiet_since = None
 
     def next(self, args):
         track, mpv = self.current()
@@ -1535,6 +1614,7 @@ def serve():
             ticks += 1
             try:
                 player.tick()
+                player.check_other_sound()
                 if ticks % SESSION_EVERY == 0:
                     player.save_session()
             except Exception:

@@ -153,7 +153,7 @@ with tempfile.TemporaryDirectory() as home:
         assert cli("library")[1]["code"] == "unauthorized"
         assert cli("repeat") == (0, {"ok": True}) and cli("state")[1]["repeat"] == "ALL"
         assert cli("volume", "250") == (0, {"ok": True}) and cli("state")[1]["volume"] == 100
-        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False, "recent": []}
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False, "autoPause": True, "recent": []}
 
         # Recent searches: newest first, no repeats (ignoring case), kept in state.json.
         assert cli("recentadd", "daft", "punk")[1]["recent"] == ["daft punk"]
