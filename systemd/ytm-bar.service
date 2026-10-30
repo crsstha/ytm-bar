@@ -6,6 +6,9 @@ After=graphical-session.target
 [Service]
 ExecStart=%h/.local/bin/ytm-bar daemon
 Restart=on-failure
+# Stop only the service first, so it can save the queue and position
+# (session.json) while mpv is still running; it then quits mpv itself.
+KillMode=mixed
 
 [Install]
 WantedBy=graphical-session.target
