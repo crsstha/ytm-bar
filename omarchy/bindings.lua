@@ -7,4 +7,6 @@ hl.layer_rule({ match = { namespace = "omarchy-keyboard-panel" }, blur = true, i
 -- "Sign in with Google": a small floating window in the middle of the screen
 -- (its class comes from the page it opens on, see SIGNIN_START in bin/ytm-bar).
 o.window(".*ytm-bar%20sign-in.*", { float = true, center = true, size = { 480, 680 } })
+-- ytm-tui (Settings → Open in TUI): a floating window in the middle of the screen.
+o.window("org.omarchy.ytm-tui", { float = true, center = true, size = { 900, 700 } })
 -- <<< ytm-bar <<<
