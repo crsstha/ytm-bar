@@ -1533,23 +1533,33 @@ def run(command, args):
     return result
 
 
-WAVE = "▁▂▃▄▅▆▇█"
+# Braille dots, bottom to top, for the left and right column of a character:
+# each character draws two wave bars, one to four dots high.
+DOTS = ((0x40, 0x04, 0x02, 0x01), (0x80, 0x20, 0x10, 0x08))
+
+
+def braille_wave(levels):
+    """Bars of 1-4 dots (levels 0..1) as braille, two per character."""
+    heights = [1 + min(3, int(level * 4)) for level in levels]
+    return "".join(chr(0x2800 + sum(DOTS[0][:left]) + sum(DOTS[1][:right]))
+                   for left, right in zip(heights[::2], heights[1::2]))
 
 
 def polybar_label(song, phase=0.0):
-    """The pill for polybar (i3/polybar.ini), like BarWidget.qml: a wave and the
-    title, amber while playing and dimmed while paused; a music note otherwise."""
+    """The pill for polybar (i3/polybar.ini), like BarWidget.qml: a dot wave,
+    the title and the time; amber and moving while playing, grey and flat
+    while paused. The wave uses the bar's third font (%{T3}), a size up."""
     if not song:
         return "%{F#707880}󰝚%{F-}"
     title = song["title"] if len(song["title"]) <= 30 else song["title"][:29].strip() + "…"
     title = title.replace("%", "%%")  # polybar formatting tags start with %
+    time_text = clock(song.get("elapsedSeconds") or 0)
     if song["isPaused"]:
-        return f"%{{F#707880}}{WAVE[0] * 4} {title}%{{F-}}"
+        return f"%{{F#707880}}%{{T3}}{braille_wave([0] * 4)}%{{T-}}  {title}  {time_text}%{{F-}}"
     # The same ripple as BarWidget.qml: each bar a sine offset from its neighbour.
-    levels = (0.5 + 0.5 * math.sin(phase + i * 0.9) * (0.65 + 0.35 * math.sin(phase * 0.37 + i * 1.7))
-              for i in range(4))
-    wave = "".join(WAVE[min(7, int(level * 8))] for level in levels)
-    return f"%{{F#F3C98B}}{wave}%{{F-}} {title}"
+    levels = [0.5 + 0.5 * math.sin(phase + i * 0.9) * (0.65 + 0.35 * math.sin(phase * 0.37 + i * 1.7))
+              for i in range(4)]
+    return f"%{{F#F3C98B}}%{{T3}}{braille_wave(levels)}%{{T-}}%{{F-}}  {title}  %{{F#707880}}{time_text}%{{F-}}"
 
 
 def current_song():

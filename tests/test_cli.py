@@ -183,12 +183,20 @@ with tempfile.TemporaryDirectory() as home:
         daemon.terminate()
         daemon.wait(5)
 
-# The polybar pill: dimmed when stopped or paused, % escaped, long titles cut.
+# The polybar pill: a braille dot wave, title and time; grey while paused.
+assert bar.braille_wave([0, 0, 0, 0]) == "⣀⣀" and bar.braille_wave([1, 1, 1, 1]) == "⣿⣿"
+assert bar.braille_wave([0, 0.99, 0.5, 0.3]) == "⣸⣦"
 assert bar.polybar_label(None) == "%{F#707880}󰝚%{F-}"
-assert bar.polybar_label({"title": "100% Pure", "isPaused": False}, 0).endswith("%{F-} 100%% Pure")
-assert bar.polybar_label({"title": "100% Pure", "isPaused": False}, 0) != \
-    bar.polybar_label({"title": "100% Pure", "isPaused": False}, 1.8)  # the wave moves
-assert bar.polybar_label({"title": "x" * 40, "isPaused": True}) == "%{F#707880}▁▁▁▁ " + "x" * 29 + "…%{F-}"
+playing = {"title": "100% Pure", "isPaused": False, "elapsedSeconds": 83}
+assert bar.polybar_label(playing, 0).endswith("%{T-}%{F-}  100%% Pure  %{F#707880}1:23%{F-}")
+assert bar.polybar_label(playing, 0) != bar.polybar_label(playing, 1.8)  # the wave moves
+assert bar.polybar_label({"title": "x" * 40, "isPaused": True, "elapsedSeconds": 5}) == \
+    "%{F#707880}%{T3}⣀⣀%{T-}  " + "x" * 29 + "…  0:05%{F-}"
+
+# Volume levelling joins the equalizer's filter chain.
+assert bar.audio_filter("flat", False) == ""
+assert bar.audio_filter("flat", True) == "lavfi=[" + bar.NORMALIZE_FILTER + "]"
+assert bar.audio_filter("bass", True) == bar.eq_filter("bass")[:-1] + "," + bar.NORMALIZE_FILTER + "]"
 
 # ytm-tui: input parsing and fitting text into cells.
 spec = spec_from_loader("ytm_tui", SourceFileLoader("ytm_tui", str(Path(CLI).parent / "ytm-tui")))
