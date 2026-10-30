@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """ytm-tui — the Mini Player in a terminal. Same tabs and controls as the bar
-popup (Playing, Find, Saved, For you, Settings), driven by the ytm-bar service.
+popup (Playing, Search, Saved, For you, Settings), driven by the ytm-bar service.
 
 Keys (also shown at the bottom):
-  1-4 / Tab      Playing, Find, Saved, For you     ,  Settings
+  1-4 / Tab      Playing, Search, Saved, For you   ,  Settings
   space          play / pause      n / p   next / previous
   ← / →          seek 5 s          + / -   volume
   m  mute        s  shuffle        r  repeat       l / d  like / dislike
@@ -69,7 +69,7 @@ ICON = {
 }
 CAP_LEFT, CAP_RIGHT = "", ""  # rounded ends, for pills
 
-TABS = [("now", "Playing"), ("search", "Find"), ("library", "Saved"), ("home", "For you")]
+TABS = [("now", "Playing"), ("search", "Search"), ("library", "Saved"), ("home", "For you")]
 FILTERS = [("all", "All"), ("songs", "Songs"), ("albums", "Albums"), ("artists", "Artists"),
            ("playlists", "Playlists"), ("videos", "Videos")]
 SLEEP = [("off", "Off"), ("15", "15 min"), ("30", "30 min"), ("60", "1 hr"), ("end", "End of song")]
@@ -511,7 +511,7 @@ class App:
         return c
 
     def draw_tabs(self, c, y, x, width):
-        # The segmented control: Playing · Find · Saved · For you, Settings on the right.
+        # The segmented control: Playing · Search · Saved · For you, Settings on the right.
         seg = (width - 4) // 4
         for i, (key, label) in enumerate(TABS):
             active = self.tab == key and not self.pages
@@ -576,7 +576,7 @@ class App:
         song = self.song
         if self.status != "ok" or not song:
             if self.status == "idle":
-                c.put(y + 1, x, "Nothing playing — find something in Find (2) or For you (4).", white(0.45))
+                c.put(y + 1, x, "Nothing playing — find something in Search (2) or For you (4).", white(0.45))
             return
         p = self.player
         playing = not song.get("isPaused")
