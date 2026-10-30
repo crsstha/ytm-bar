@@ -115,6 +115,8 @@ ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
 - **"YouTube ended this login"** — sign in again from Settings.
 - **Search fails or songs skip** — ytmusicapi or yt-dlp needs an update
   (`omarchy update`); YouTube changes break them for a few days at a time.
+- **No blur behind the popup** — run `install.sh` (it adds the blur rule), then
+  `omarchy restart shell`. Updating from 1.0.0? Run it again: the rule changed.
 - **Edited the code?** `omarchy restart shell` for the QML,
   `systemctl --user restart ytm-bar` for `bin/ytm-bar`.
 

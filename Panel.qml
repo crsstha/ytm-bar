@@ -3,6 +3,7 @@ import QtQuick.Effects
 import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
@@ -1468,6 +1469,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
+    // Our own layer name, so the blur rule (omarchy/bindings.lua) only
+    // reaches this card and not every Omarchy panel.
+    WlrLayershell.namespace: "ytm-bar"
     // No inner padding: the content sets its own, like the design.
     padding: 0
     contentWidth: panel.fittedContentWidth(420)
