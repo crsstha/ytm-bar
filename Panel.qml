@@ -102,6 +102,8 @@ Panel {
   property bool showHeaderLogin: false
   // "Sign in with Google" runs in the service; its state comes with the player's.
   readonly property bool signingIn: root.player.signingIn === true
+  // "signing" while you're at Google, "finishing" once YouTube Music is reached.
+  readonly property bool signinFinishing: root.signingIn && root.player.signinStage === "finishing"
   onSigningInChanged: {
     if (root.signingIn) return
     if (root.player.loggedIn) root.reloadAccount()
@@ -2897,15 +2899,17 @@ Panel {
               lineHeight: 1.2
               font.pixelSize: 12
               color: root.white(0.7)
-              text: root.signingIn
-                ? "Finish signing in in the window that opened. It closes by itself once you're in."
+              text: root.signinFinishing
+                ? "Finishing sign-in… the window closes in a moment."
+                : root.signingIn
+                ? "Sign in to Google in the small window that opened. It closes by itself once you're in."
                 : "Log in to like songs and see Saved and a personal For you. Search and playback work without it."
             }
             Row {
               visible: !root.account.loggedIn
               spacing: 8
               Pill {
-                text: root.signingIn ? "Waiting for Google…" : "Sign in with Google"
+                text: root.signinFinishing ? "Finishing sign-in…" : (root.signingIn ? "Waiting for Google…" : "Sign in with Google")
                 icon: "account"
                 primary: true
                 onClicked: if (!root.signingIn) root.signin()

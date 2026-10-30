@@ -27,8 +27,9 @@ The installer links the `ytm-bar` and `ytm-tui` commands, enables
 `ytm-bar.service`, and adds the widget to the bar.
 
 **Log in (optional)** — for likes, your library and a personal home page:
-⚙ Settings → **Sign in with Google**. A browser window opens; sign in and it
-closes by itself. No Chromium? Use **Paste headers** instead.
+⚙ Settings → **Sign in with Google**. A small window opens on Google's sign-in
+page; once you're through to YouTube Music it closes by itself, within a few
+seconds. No Chromium? Use **Paste headers** instead.
 
 ## Use
 

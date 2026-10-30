@@ -86,9 +86,10 @@ echo "--> Player service"
 link "$REPO/systemd/ytm-bar.service" "$UNITS/ytm-bar.service"
 systemctl --user daemon-reload
 systemctl --user enable ytm-bar.service >/dev/null 2>&1
-# Don't restart a running service: that would stop the music and drop the queue.
+# Don't restart a running service: that would interrupt the music (it comes back
+# paused, at the same spot).
 if systemctl --user is-active --quiet ytm-bar.service; then
-  echo "    ytm-bar.service is running — 'systemctl --user restart ytm-bar' loads a newer bin/ytm-bar (stops playback)"
+  echo "    ytm-bar.service is running — 'systemctl --user restart ytm-bar' loads a newer bin/ytm-bar (music resumes paused)"
 else
   systemctl --user start ytm-bar.service
   echo "    ytm-bar.service enabled and started"
