@@ -45,7 +45,8 @@ closes by itself. No Chromium? Use **Paste headers** instead.
   playlists open as a page.
 - **Playlists** — the playlist button next to the hearts adds the current song
   to one of your playlists, or to a new one; **Saved → New playlist** makes an
-  empty one. New playlists are private.
+  empty one. New playlists are private. On someone else's playlist (say, from
+  For you), **Save** adds it to Saved.
 - **⚙ Settings** — sleep timer, equalizer, volume boost, **Open in TUI**, account.
 
 Media keys work too. After a restart or reboot your queue comes back, paused
@@ -73,6 +74,7 @@ Everything also works from the shell; each command prints JSON:
 ytm-bar toggle | next | previous | like | shuffle | repeat
 ytm-bar search QUERY | play VIDEO_ID | volume PERCENT | sleep MINUTES|end|off
 ytm-bar playlists | newplaylist TITLE [VIDEO_ID] | addto PLAYLIST_ID VIDEO_ID
+ytm-bar save | unsave PLAYLIST_ID
 ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
 ```
 

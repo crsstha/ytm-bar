@@ -742,6 +742,11 @@ class App:
             px = tx + len(back) + 2
             c.put(y + 4, px, play, BLACK, bg=WHITE, bold=True)
             c.click(y + 4, px, px + len(play), lambda: self.action("playall", page["type"], page["id"]))
+            if self.can_save(page):
+                save = " ✓ Saved " if page.get("saved") else " + Save "
+                sx = px + len(play) + 2
+                c.put(y + 4, sx, save, ACCENT if page.get("saved") else INK, bg=white(0.1))
+                c.click(y + 4, sx, sx + len(save), self.toggle_saved)
         y += 7
         if page.get("loading"):
             c.put(y, x, "Loading…", white(0.45))
@@ -749,6 +754,27 @@ class App:
             c.put(y, x, clip(page["error"], width), white(0.45))
         else:
             self.draw_list(c, y, x, width, bottom)
+
+    def can_save(self, page):
+        return (page.get("type") == "playlist" and not page.get("owned") and not page.get("loading")
+                and not page.get("error") and self.player.get("loggedIn"))
+
+    def toggle_saved(self):
+        """Save someone else's playlist to your library, or remove it."""
+        page = self.pages[-1] if self.pages else None
+        if not page or not self.can_save(page):
+            return
+
+        def go():
+            saving = not page.get("saved")
+            result = call("save" if saving else "unsave", [page["id"]], timeout=30)
+            if result.get("ok"):
+                page["saved"] = saving
+                self.library = None
+                self.message = ""
+            else:
+                self.message = result.get("error", "Couldn't save it")
+        self.run_bg(go)
 
     def draw_list(self, c, y, x, width, bottom, headers=True):
         """Sections of two-line rows, scrolled so the selection stays in view."""
@@ -922,7 +948,7 @@ class App:
     def hints(self):
         if self.pages:
             return [("↑↓", "move"), ("⏎", "play/open"), ("a", "play next"), ("p", "play all"),
-                    ("esc", "back"), ("q", "quit")]
+                    ("S", "save"), ("esc", "back"), ("q", "quit")]
         if self.tab == "now":
             return [("␣", "play"), ("n/p", "next/prev"), ("j/k", "select"), ("⏎", "play sel"),
                     ("J/K", "move"), ("d", "remove"), ("+/-", "vol"), ("m", "mute"), ("s", "shuffle"),
@@ -1026,6 +1052,8 @@ class App:
             self.action("dislike")
         elif k == "e":
             self.cycle_eq()
+        elif k == "S" and self.pages:
+            self.toggle_saved()
         elif k == "a":
             item = self.selected()
             if item and item["type"] in ("song", "video"):

@@ -151,6 +151,8 @@ Panel {
     volume: "M11 5L6 9H3v6h3l5 4zM15.5 9a4 4 0 0 1 0 6",
     muted: "M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5",
     chevron: "M9 6l6 6-6 6",
+    plus: "M12 5v14M5 12h14",
+    check: "M5 12l5 5l10-10",
     playlistAdd: "M19 8h-14M5 12h9M11 16h-6M15 16h6M18 13v6",
     list: "M9 6h11M9 12h11M9 18h11M5 6v.01M5 12v.01M5 18v.01",
     grid: "M4 4h6v6h-6zM14 4h6v6h-6zM4 14h6v6h-6zM14 14h6v6h-6z",
@@ -541,6 +543,26 @@ Panel {
         if (root.tab === "library") root.loadLibrary()
       }
       if (done) done(result.ok)
+    })
+  }
+
+  function toggleSaved() {
+    var page = root.page
+    if (!page) return
+    var saving = !page.saved
+    root.call(saving ? "save" : "unsave", [page.id], function(result) {
+      if (!result.ok) {
+        root.message = result.error || "Couldn't save it"
+        return
+      }
+      root.message = ""
+      var at = root.pages.indexOf(page)
+      if (at >= 0) {
+        var pages = root.pages.slice()
+        pages[at] = Object.assign({}, page, { saved: saving })
+        root.pages = pages
+      }
+      root.libraryLoaded = false
     })
   }
 
@@ -1512,6 +1534,14 @@ Panel {
                     icon: "playFill"
                     primary: true
                     onClicked: root.action("playall", [root.page.type, root.page.id])
+                  }
+                  // Someone else's playlist: save it to (or remove it from) your library.
+                  Pill {
+                    visible: root.page !== null && root.page.type === "playlist" && !root.page.loading
+                      && !root.page.error && !root.page.owned && root.player.loggedIn
+                    text: root.page && root.page.saved ? "Saved" : "Save"
+                    icon: root.page && root.page.saved ? "check" : "plus"
+                    onClicked: root.toggleSaved()
                   }
                 }
               }
