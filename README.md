@@ -1,185 +1,92 @@
 # ytm-bar
 
-YouTube Music in the [Omarchy](https://omarchy.org/) bar: a now-playing pill and a
-player popup with search, like/dislike, shuffle, repeat, volume, seeking and the
-up-next queue. There's no app or window — the bar is the whole UI.
+YouTube Music in the [Omarchy](https://omarchy.org/) bar — no app, no browser tab.
 
-It plays YouTube Music without the YouTube Music app:
-[ytmusicapi](https://github.com/sigma67/ytmusicapi) searches and builds the radio
-queue, and [mpv](https://mpv.io/) with [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-plays the audio. The player runs as a small user service, `ytm-bar.service`.
+<img src="docs/pill.png" alt="The now-playing pill in the bar" height="26">
+
+<p>
+  <img src="docs/popup.png" alt="The player popup" width="380">
+  <img src="docs/tui.png" alt="ytm-tui in a terminal" width="430">
+</p>
+
+A now-playing pill and a player popup with search, your library, home, likes,
+an editable queue, sleep timer, equalizer and volume boost — plus `ytm-tui`, the
+same player in a terminal. Search and radio come from
+[ytmusicapi](https://github.com/sigma67/ytmusicapi); audio plays through
+[mpv](https://mpv.io/) + [yt-dlp](https://github.com/yt-dlp/yt-dlp) in a small
+user service.
 
 ## Install
 
-1. Install the packages:
+```bash
+omarchy pkg add mpv yt-dlp python-ytmusicapi mpv-mpris
+./install.sh            # --no-bindings to skip Super+Alt+M
+```
 
-   ```bash
-   omarchy pkg add mpv yt-dlp python-ytmusicapi mpv-mpris
-   ```
+The installer links the `ytm-bar` and `ytm-tui` commands, enables
+`ytm-bar.service`, and adds the widget to the bar.
 
-   `mpv-mpris` is optional; it gives the player media keys and shows it to
-   other MPRIS widgets.
+**Log in (optional)** — for likes, your library and a personal home page:
+⚙ Settings → **Sign in with Google**. A browser window opens; sign in and it
+closes by itself. No Chromium? Use **Paste headers** instead.
 
-2. Install the widget:
+## Use
 
-   ```bash
-   ./install.sh    # --no-bindings to skip the keybinding
-   ```
-
-   This links `bin/ytm-bar` into `~/.local/bin`, links and enables
-   `systemd/ytm-bar.service` (it starts with your session), links this repo as the
-   `crsstha.ytmusic` plugin, puts the widget at the start of the bar's right section, and adds a keybinding
-   to `~/.config/hypr/bindings.lua`.
-
-3. Optional — log in for likes, your library and a personal home page: open the
-   popup's ⚙ **Settings** and press **Sign in with Google** (or run
-   `ytm-bar signin`). A Chromium window opens on Google's sign-in page; once
-   you're in, ytm-bar reads YouTube Music's cookies from that window's own
-   profile (`~/.config/ytm-bar/chromium`, via yt-dlp) and the window closes.
-   That profile is ytm-bar's alone, so restarting or signing out of your usual
-   browser doesn't end the login. The login is checked, then saved to
-   `~/.config/ytm-bar/browser.json` (0600). Search, browsing, playback and radio
-   work without logging in.
-
-   Without Chromium (or Chrome/Brave), use **Paste headers** instead: copy the
-   request headers of a signed-in music.youtube.com tab, paste them and press
-   **Log in** (or `ytm-bar login` in a terminal).
-
-## Using it
-
-| Action | What it does |
+| In the bar | |
 |---|---|
-| Left-click | Open the player popup (or start the player service, if it's stopped) |
-| Middle-click | Play / pause |
-| Scroll up / down | Previous / next track |
-| Right-click | Open the popup with the cursor in the search box |
-| `Super + Alt + M` | Open / close the player popup, cursor in the search box |
+| Click | open the popup |
+| Right-click · `Super+Alt+M` | open the popup in search |
+| Middle-click | play / pause |
+| Scroll | previous / next |
 
-The pill shows the play state and the song title, dimmed while paused.
+- **Now** — controls, volume and the up-next queue (drag to reorder, hover to
+  play next or remove). The radio for the current song keeps the queue going.
+- **Search · Library · Home** — click a song to play it; albums, artists and
+  playlists open as a page.
+- **⚙ Settings** — sleep timer, equalizer, volume boost, **Open in TUI**, account.
 
-The popup has tabs, like YouTube Music:
-- **Now** — the player: seek, controls, mute and volume, and **Up next**. Click a
-  song to jump to it; hover for ↑ (play next) and ✕ (remove); drag to reorder.
-  When the queue runs low, the radio for the current song is added. Disliking a
-  song skips it. A set sleep timer shows under the progress bar (click to cancel).
-- **Search** — filter by All, Songs, Albums, Artists, Playlists or Videos. Click a
-  song to play it now (its radio follows), or hover and click 󰐕 to play it next.
-  Albums, artists and playlists open as a page; **Play** plays all of it, and
-  clicking a song there plays the album or playlist from that song.
-  Esc clears the search, a second Esc closes the popup.
-- **Library** — your playlists (including Liked Music), albums and artists. Needs login.
-- **Home** — YouTube Music's home page (personal when you're logged in).
-- **⚙ Settings** — sleep timer (15 min, 30 min, 1 hr or end of song; it only
-  counts while music plays), equalizer presets (Flat, Bass, Vocal, Treble,
-  Loudness, Night), volume boost (up to 150%), **Open in TUI** (starts or
-  focuses `ytm-tui` in your terminal) and your account: log in or out.
-  The equalizer, boost and volume are remembered.
+Media keys work too. After a restart or reboot your queue comes back, paused
+where you left it.
 
-On a page, Esc goes back. From a script: `omarchy-shell crsstha.ytmusic show home`
-or `omarchy-shell crsstha.ytmusic search "daft punk"`.
+### In a terminal
 
-The service remembers where you left off: every few seconds (and when it
-stops) it saves the queue, the current song and its position to
-`~/.local/state/ytm-bar/session.json`. After a restart or reboot the queue is
-back, paused at the same spot — press play. Media keys work through
-mpv-mpris: Omarchy sends them to the active MPRIS player, which is ytm-bar's
-mpv.
-
-## In a terminal
-
-`ytm-tui` is the same player as a full-screen terminal app, opened from
-Settings → **Open in TUI** or by running `ytm-tui`. Its Now tab is the design's
-keyboard-driven view: a *now playing* box (state, title, `[S][R]` shuffle and
-repeat flags, like, a `━━╸──` progress bar), the numbered *queue*, and a
-volume / eq / sleep status line. Search, Library, Home, pages and Settings work
-as in the popup, with cover art drawn in the terminal. It needs a Nerd Font (Omarchy's default) and talks to the same
-service, so the bar and the terminal stay in step.
+Run `ytm-tui` (or Settings → **Open in TUI**). The key hints are always at the
+bottom; the main ones:
 
 | Keys | |
 |---|---|
-| `1`–`4`, `Tab` | Now, Search, Library, Home · `,` Settings |
 | `space` · `n` / `p` | play / pause · next / previous |
-| `←` / `→` · `+` / `-` | seek 5 s · volume |
-| `m` `s` `r` `l` `D` · `e` | mute, shuffle, repeat, like, dislike · next eq preset |
-| `↑` `↓` / `j` `k` · `Enter` | move · play or open |
-| `a` | play the selected song next |
-| `d` (or `x`) · `u` · `J` / `K` | in the queue: remove · play next · move down / up |
-| `/` · `Esc` · `q` | search · back · quit |
+| `j` / `k` · `Enter` | select · play |
+| `J` / `K` · `d` · `u` | move · remove · play next |
+| `+` / `-` · `m` · `e` | volume · mute · next eq preset |
+| `s` · `r` · `l` | shuffle · repeat · like |
+| `1`–`4` · `,` · `/` · `q` | tabs · settings · search · quit |
 
-The mouse works too: click tabs, rows and controls, and scroll lists. In
-Settings, Enter on the account opens the Google sign-in window; `h` pastes
-headers instead, in the plain terminal.
+## Command line
 
-## How it works
+Everything also works from the shell; each command prints JSON:
 
-- `ytm-bar daemon` (the service) keeps one mpv process, started on the first
-  play, and drives it over its JSON IPC socket. mpv's playlist is the queue.
-  It serves a small JSON API on `127.0.0.1:26539`; every request must carry an
-  `X-Ytm-Bar` header, so web pages can't drive it.
-- `Panel.qml` calls the service directly (`POST /<command>`), and polls
-  `GET /song` for the live display: every second while
-  music plays or the popup is open, otherwise every 2 s, or every 5 s while the
-  service is stopped.
-- The same commands work from the shell through `bin/ytm-bar`; each prints one JSON object:
-
-  ```
-  ytm-bar start | signin | login | logout | account
-  ytm-bar song | state | queue
-  ytm-bar toggle | next | previous | like | dislike | shuffle | repeat
-  ytm-bar seek SECONDS | volume PERCENT | jump INDEX | mute | boost
-  ytm-bar eq PRESET | sleep MINUTES|end|off
-  ytm-bar remove INDEX | playnext INDEX | move FROM TO
-  ytm-bar search QUERY [--filter songs|videos|albums|artists|playlists]
-  ytm-bar home | library | open album|artist|playlist ID
-  ytm-bar play VIDEO_ID | add VIDEO_ID | playall album|artist|playlist ID [INDEX]
-  ```
-
-- The volume, equalizer and boost are remembered in `~/.local/state/ytm-bar/state.json`. The queue
-  isn't: it starts empty after a restart.
-- Set `YTM_BAR_PORT` for the service and CLI if 26539 is taken (the QML side
-  uses 26539).
-
-## Limits
-
-- ytmusicapi and yt-dlp are unofficial: they break when YouTube changes things,
-  usually for a few days until an update lands (`omarchy update`).
-- Audio is ~130 kbps Opus; 256 kbps needs YouTube Premium cookies, which isn't
-  supported yet. Age-restricted songs need cookies too and won't play.
-- What you play isn't added to your YouTube Music history.
+```
+ytm-bar toggle | next | previous | like | shuffle | repeat
+ytm-bar search QUERY | play VIDEO_ID | volume PERCENT | sleep MINUTES|end|off
+ytm-bar song | queue | signin | logout          # ytm-bar --help for all
+```
 
 ## Troubleshooting
 
-- **Pill stays a dimmed 󰝚** — the service is stopped: `systemctl --user status ytm-bar`,
-  logs with `journalctl --user -u ytm-bar`.
-- **Login says "Those headers didn't work"** — copy the headers of a POST
-  request to `browse` while signed in; other requests miss fields ytmusicapi needs.
-  Logins expire when you sign out of YouTube in that browser; log in again.
-- **"YouTube ended this login"** — YouTube revoked the saved cookies (usually
-  a sign-out in the browser they came from). ytm-bar first retries with the
-  sign-in window's profile; if that's signed out too, sign in again.
-- **Search says "YouTube Music: …"** — ytmusicapi failed; check the network, or
-  update it. `ytm-bar search test` shows the full error.
-- **A song is skipped right away** — yt-dlp couldn't get it (region-locked,
-  age-restricted, or yt-dlp needs an update).
-- **Edited the QML and nothing changed** — the shell doesn't notice edits made
-  through the plugin symlink. Run `omarchy restart shell`.
-- Edited `bin/ytm-bar`? `systemctl --user restart ytm-bar`.
+- **Pill stays dimmed** — the service is stopped: `systemctl --user status ytm-bar`.
+- **"YouTube ended this login"** — sign in again from Settings.
+- **Search fails or songs skip** — ytmusicapi or yt-dlp needs an update
+  (`omarchy update`); YouTube changes break them for a few days at a time.
+- **Edited the code?** `omarchy restart shell` for the QML,
+  `systemctl --user restart ytm-bar` for `bin/ytm-bar`.
 
-## Design
+## Notes
 
-The popup follows the "Mini Player" design: dark glass with a warm glow, a
-segmented tab bar, and the design's own icons (SVG paths drawn with Qt Shapes).
-It uses the [Geist](https://github.com/vercel/geist-font) fonts, bundled in
-`fonts/` under the SIL Open Font License (`fonts/OFL.txt`).
-
-## Tests
-
-```bash
-python3 tests/test_cli.py
-```
-
-## Uninstall
-
-```bash
-./uninstall.sh            # keeps the login; --purge removes ~/.config/ytm-bar
-```
+- Audio is ~130 kbps Opus; age-restricted songs don't play, and plays aren't
+  added to your YouTube Music history.
+- Your login is stored only in `~/.config/ytm-bar` (readable by you alone).
+- Fonts: [Geist](https://github.com/vercel/geist-font), under the SIL Open Font
+  License (`fonts/OFL.txt`).
+- Tests: `python3 tests/test_cli.py`. Uninstall: `./uninstall.sh`
+  (`--purge` also removes the login).
