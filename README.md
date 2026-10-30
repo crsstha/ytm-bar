@@ -28,15 +28,22 @@ plays the audio. The player runs as a small user service, `ytm-bar.service`.
 
    This links `bin/ytm-bar` into `~/.local/bin`, links and enables
    `systemd/ytm-bar.service` (it starts with your session), links this repo as the
-   `crsstha.ytmusic` plugin, puts the widget after the clock, and adds a keybinding
+   `crsstha.ytmusic` plugin, puts the widget at the start of the bar's right section, and adds a keybinding
    to `~/.config/hypr/bindings.lua`.
 
 3. Optional — log in for likes, your library and a personal home page: open the
-   popup's ⚙ **Settings**, follow the steps there to copy request headers from a
-   signed-in music.youtube.com tab, paste them and press **Log in** (or run
-   `ytm-bar login` in a terminal). They're checked, then saved to
+   popup's ⚙ **Settings** and press **Sign in with Google** (or run
+   `ytm-bar signin`). A Chromium window opens on Google's sign-in page; once
+   you're in, ytm-bar reads YouTube Music's cookies from that window's own
+   profile (`~/.config/ytm-bar/chromium`, via yt-dlp) and the window closes.
+   That profile is ytm-bar's alone, so restarting or signing out of your usual
+   browser doesn't end the login. The login is checked, then saved to
    `~/.config/ytm-bar/browser.json` (0600). Search, browsing, playback and radio
    work without logging in.
+
+   Without Chromium (or Chrome/Brave), use **Paste headers** instead: copy the
+   request headers of a signed-in music.youtube.com tab, paste them and press
+   **Log in** (or `ytm-bar login` in a terminal).
 
 ## Using it
 
@@ -64,11 +71,37 @@ The popup has tabs, like YouTube Music:
 - **Home** — YouTube Music's home page (personal when you're logged in).
 - **⚙ Settings** — sleep timer (15 min, 30 min, 1 hr or end of song; it only
   counts while music plays), equalizer presets (Flat, Bass, Vocal, Treble,
-  Loudness, Night), volume boost (up to 150%), and your account: log in or out.
+  Loudness, Night), volume boost (up to 150%), **Open in TUI** (starts or
+  focuses `ytm-tui` in your terminal) and your account: log in or out.
   The equalizer, boost and volume are remembered.
 
 On a page, Esc goes back. From a script: `omarchy-shell crsstha.ytmusic show home`
 or `omarchy-shell crsstha.ytmusic search "daft punk"`.
+
+## In a terminal
+
+`ytm-tui` is the same player as a full-screen terminal app, opened from
+Settings → **Open in TUI** or by running `ytm-tui`. Its Now tab is the design's
+keyboard-driven view: a *now playing* box (state, title, `[S][R]` shuffle and
+repeat flags, like, a `━━╸──` progress bar), the numbered *queue*, and a
+volume / eq / sleep status line. Search, Library, Home, pages and Settings work
+as in the popup, with cover art drawn in the terminal. It needs a Nerd Font (Omarchy's default) and talks to the same
+service, so the bar and the terminal stay in step.
+
+| Keys | |
+|---|---|
+| `1`–`4`, `Tab` | Now, Search, Library, Home · `,` Settings |
+| `space` · `n` / `p` | play / pause · next / previous |
+| `←` / `→` · `+` / `-` | seek 5 s · volume |
+| `m` `s` `r` `l` `D` · `e` | mute, shuffle, repeat, like, dislike · next eq preset |
+| `↑` `↓` / `j` `k` · `Enter` | move · play or open |
+| `a` | play the selected song next |
+| `d` (or `x`) · `u` · `J` / `K` | in the queue: remove · play next · move down / up |
+| `/` · `Esc` · `q` | search · back · quit |
+
+The mouse works too: click tabs, rows and controls, and scroll lists. In
+Settings, Enter on the account opens the Google sign-in window; `h` pastes
+headers instead, in the plain terminal.
 
 ## How it works
 
@@ -83,7 +116,7 @@ or `omarchy-shell crsstha.ytmusic search "daft punk"`.
 - The same commands work from the shell through `bin/ytm-bar`; each prints one JSON object:
 
   ```
-  ytm-bar start | login | logout | account
+  ytm-bar start | signin | login | logout | account
   ytm-bar song | state | queue
   ytm-bar toggle | next | previous | like | dislike | shuffle | repeat
   ytm-bar seek SECONDS | volume PERCENT | jump INDEX | mute | boost
@@ -114,6 +147,9 @@ or `omarchy-shell crsstha.ytmusic search "daft punk"`.
 - **Login says "Those headers didn't work"** — copy the headers of a POST
   request to `browse` while signed in; other requests miss fields ytmusicapi needs.
   Logins expire when you sign out of YouTube in that browser; log in again.
+- **"YouTube ended this login"** — YouTube revoked the saved cookies (usually
+  a sign-out in the browser they came from). ytm-bar first retries with the
+  sign-in window's profile; if that's signed out too, sign in again.
 - **Search says "YouTube Music: …"** — ytmusicapi failed; check the network, or
   update it. `ytm-bar search test` shows the full error.
 - **A song is skipped right away** — yt-dlp couldn't get it (region-locked,

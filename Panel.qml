@@ -82,6 +82,14 @@ Panel {
   property var account: ({ loggedIn: false, name: "", handle: "", photo: "" })
   property bool loginBusy: false
   property string loginError: ""
+  property bool showHeaderLogin: false
+  // "Sign in with Google" runs in the service; its state comes with the player's.
+  readonly property bool signingIn: root.player.signingIn === true
+  onSigningInChanged: {
+    if (root.signingIn) return
+    if (root.player.loggedIn) root.reloadAccount()
+    else root.loginError = root.player.signinError || ""
+  }
 
   // Sliders: after a seek/volume change, hold the new value until the service reports
   // it, so the knob doesn't snap back to the stale value and jump forward again.
@@ -446,7 +454,9 @@ Panel {
   // ---- Settings: the YouTube Music login.
   function loadAccount() {
     root.call("account", [], function(result) {
-      if (result.ok) root.account = result
+      if (!result.ok) return
+      root.account = result
+      if (result.expired) root.loginError = "YouTube ended this login — sign in again"
     })
   }
 
@@ -471,6 +481,20 @@ Panel {
       } else {
         root.loginError = result.error || "Couldn't log in"
       }
+    })
+  }
+
+  // Focus ytm-tui's terminal if it's open, otherwise start one.
+  function openTui() {
+    Quickshell.execDetached(["bash", "-lc", "omarchy-launch-or-focus-tui ytm-tui"])
+    root.close()
+  }
+
+  function signin() {
+    root.loginError = ""
+    root.call("signin", [], function(result) {
+      if (!result.ok) root.loginError = result.error || "Couldn't open the sign-in window"
+      else root.refreshPlayer()
     })
   }
 
@@ -1949,6 +1973,69 @@ Panel {
               }
             }
 
+            // ---- Interface: the same player full-screen in a terminal (bin/ytm-tui).
+            Item { width: 1; height: 10 }
+            SectionHeader { text: "Interface" }
+            Rectangle {
+              width: parent.width
+              height: 52
+              radius: 12
+              color: tuiArea.containsMouse ? root.white(0.08) : root.white(0.04)
+              border.width: 1
+              border.color: root.white(0.08)
+
+              Rectangle {
+                id: tuiBadge
+                x: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: 30
+                height: 30
+                radius: 8
+                color: Qt.rgba(0, 0, 0, 0.4)
+                border.width: 1
+                border.color: root.white(0.1)
+
+                Label {
+                  anchors.centerIn: parent
+                  text: ">_"
+                  font.family: root.monoFont
+                  font.pixelSize: 12
+                  color: root.accent
+                }
+              }
+              Column {
+                anchors.left: tuiBadge.right
+                anchors.leftMargin: 12
+                anchors.right: tuiChevron.left
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 2
+
+                Label { text: "Open in TUI"; weight: Font.Medium }
+                Label {
+                  text: "Keyboard-driven terminal view"
+                  font.pixelSize: 12
+                  color: root.white(0.45)
+                }
+              }
+              Icon {
+                id: tuiChevron
+                anchors.right: parent.right
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                name: "chevron"
+                size: 14
+                color: root.white(0.4)
+              }
+              MouseArea {
+                id: tuiArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openTui()
+              }
+            }
+
             // ---- The YouTube Music account.
             Item { width: 1; height: 10 }
             SectionHeader { text: "Account" }
@@ -1998,7 +2085,8 @@ Panel {
               }
             }
 
-            // Not logged in: paste request headers from the browser.
+            // Not logged in: sign in to Google in a browser window, or paste
+            // request headers from the browser.
             Label {
               visible: !root.account.loggedIn
               width: parent.width
@@ -2007,14 +2095,39 @@ Panel {
               lineHeight: 1.2
               font.pixelSize: 12
               color: root.white(0.7)
-              text: "Log in to like songs and see your library and personal home. Search and playback work without it.\n\n"
-                + "1. Open music.youtube.com in your browser, signed in.\n"
+              text: root.signingIn
+                ? "Finish signing in in the window that opened. It closes by itself once you're in."
+                : "Log in to like songs and see your library and personal home. Search and playback work without it."
+            }
+            Row {
+              visible: !root.account.loggedIn
+              spacing: 8
+              Pill {
+                text: root.signingIn ? "Waiting for Google…" : "Sign in with Google"
+                icon: "account"
+                primary: true
+                onClicked: if (!root.signingIn) root.signin()
+              }
+              Pill {
+                text: root.showHeaderLogin ? "Hide headers" : "Paste headers"
+                onClicked: root.showHeaderLogin = !root.showHeaderLogin
+              }
+            }
+            Label {
+              visible: !root.account.loggedIn && root.showHeaderLogin
+              width: parent.width
+              wrapMode: Text.Wrap
+              elide: Text.ElideNone
+              lineHeight: 1.2
+              font.pixelSize: 12
+              color: root.white(0.7)
+              text: "1. Open music.youtube.com in your browser, signed in.\n"
                 + "2. Open the developer tools (F12) → Network, and reload the page.\n"
                 + "3. Find a POST request to “browse”, right-click → Copy → Copy request headers.\n"
                 + "4. Paste them below and press Log in."
             }
             Rectangle {
-              visible: !root.account.loggedIn
+              visible: !root.account.loggedIn && root.showHeaderLogin
               width: parent.width
               height: 110
               radius: 12
@@ -2060,7 +2173,7 @@ Panel {
               }
             }
             Pill {
-              visible: !root.account.loggedIn
+              visible: !root.account.loggedIn && root.showHeaderLogin
               text: root.loginBusy ? "Checking…" : "Log in"
               icon: "account"
               primary: true
@@ -2082,7 +2195,7 @@ Panel {
               elide: Text.ElideNone
               font.pixelSize: 11
               color: root.white(0.4)
-              text: "The headers contain your login cookie. They're saved only on this computer, in ~/.config/ytm-bar/browser.json, readable by you alone."
+              text: "Your login cookie is saved only on this computer, in ~/.config/ytm-bar, readable by you alone. Signing out of Google in the sign-in window ends it."
             }
           }
         }

@@ -27,6 +27,7 @@ systemctl --user disable --now ytm-bar.service >/dev/null 2>&1 || true
 unlink_if_ours "$HOME/.config/systemd/user/ytm-bar.service"
 systemctl --user daemon-reload || true
 unlink_if_ours "$HOME/.local/bin/ytm-bar"
+unlink_if_ours "$HOME/.local/bin/ytm-tui"
 
 if command -v omarchy >/dev/null 2>&1; then
   omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || true
