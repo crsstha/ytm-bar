@@ -78,6 +78,13 @@ The popup has tabs, like YouTube Music:
 On a page, Esc goes back. From a script: `omarchy-shell crsstha.ytmusic show home`
 or `omarchy-shell crsstha.ytmusic search "daft punk"`.
 
+The service remembers where you left off: every few seconds (and when it
+stops) it saves the queue, the current song and its position to
+`~/.local/state/ytm-bar/session.json`. After a restart or reboot the queue is
+back, paused at the same spot — press play. Media keys work through
+mpv-mpris: Omarchy sends them to the active MPRIS player, which is ytm-bar's
+mpv.
+
 ## In a terminal
 
 `ytm-tui` is the same player as a full-screen terminal app, opened from

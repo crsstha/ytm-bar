@@ -74,6 +74,10 @@ SIGNIN_URL = ("https://accounts.google.com/ServiceLogin?service=youtube&continue
               "https%253A%252F%252Fmusic.youtube.com%252F")
 SIGNIN_BROWSERS = ("chromium", "google-chrome-stable", "brave")
 STATE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "ytm-bar/state.json"
+# The queue and position, so a restart (or reboot) resumes where you left off.
+SESSION_FILE = STATE_FILE.parent / "session.json"
+SESSION_EVERY = 5  # seconds between saves while something is loaded
+SESSION_LIMIT = 200  # songs kept
 MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock"
 SERVICE = "ytm-bar.service"
 WATCH_URL = "https://music.youtube.com/watch?v="
@@ -434,6 +438,7 @@ class Player:
         self._home = (0, None, None)  # (time, auth, sections)
         self._account = (None, None)  # (auth, info)
         self._signin = None  # the sign-in window's process, while it's watched
+        self._session = ""  # what session.json holds
         self.signin_error = ""
         try:
             saved = json.loads(STATE_FILE.read_text())
@@ -1000,6 +1005,66 @@ class Player:
             self.sleep = None
             mpv.set("pause", True)
 
+    # -- Resuming where you left off.
+
+    def save_session(self):
+        """Keep the queue, the current song and its position in session.json.
+        Nothing loaded (stopped, or the queue ran out) leaves the last one."""
+        track, mpv = self.current()
+        if track is None:
+            return
+        playlist = mpv.get("playlist", [])
+        index = self.current_index(playlist)
+        ids = [video_id_of(item.get("filename")) for item in playlist]
+        # Keep up to SESSION_LIMIT songs around the current one.
+        first = max(0, min(index - SESSION_LIMIT // 4, len(ids) - SESSION_LIMIT))
+        ids, index = ids[first:first + SESSION_LIMIT], index - first
+        session = json.dumps({
+            "queue": ids, "index": index,
+            "position": round(mpv.get("time-pos", 0) or 0, 1),
+            "shuffle": self.shuffle, "repeat": self.repeat,
+            "tracks": {v: self.tracks[v] for v in ids if v in self.tracks},
+        })
+        if session == self._session:
+            return
+        try:
+            SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = SESSION_FILE.with_suffix(".tmp")
+            tmp.write_text(session)
+            tmp.replace(SESSION_FILE)
+            self._session = session
+        except OSError:
+            pass
+
+    def restore_session(self):
+        """Load the saved queue, paused at the saved position."""
+        try:
+            session = json.loads(SESSION_FILE.read_text())
+            ids = [v for v in session["queue"] if isinstance(v, str) and re.fullmatch(r"[\w-]{11}", v)]
+            index = int(session["index"])
+            position = max(0.0, float(session.get("position", 0)))
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if not ids or not 0 <= index < len(ids):
+            return
+        with self.lock:
+            for video_id, track in (session.get("tracks") or {}).items():
+                if isinstance(track, dict) and video_id in ids:
+                    self.tracks.setdefault(video_id, track)
+            self.shuffle = bool(session.get("shuffle"))
+            if session.get("repeat") in REPEAT_MODES:
+                self.repeat = session["repeat"]
+            mpv = self.player()
+            if self.current()[0] is not None:
+                return  # something started playing meanwhile
+            mpv.set("pause", True)
+            self.apply_repeat()
+            for i, video_id in enumerate(ids):
+                options = f"start={position}" if i == index else ""
+                mpv.command("loadfile", WATCH_URL + video_id, "append", -1, options)
+            mpv.set("playlist-pos", index)
+        self._session = ""
+
     # -- Editing the queue (indexes are mpv playlist positions).
 
     def queue_index(self, value):
@@ -1116,10 +1181,18 @@ def serve():
     server.daemon_threads = True
 
     def ticker():
+        try:
+            player.restore_session()
+        except Exception:
+            traceback.print_exc()
+        ticks = 0
         while True:
             time.sleep(1)
+            ticks += 1
             try:
                 player.tick()
+                if ticks % SESSION_EVERY == 0:
+                    player.save_session()
             except Exception:
                 traceback.print_exc()
     threading.Thread(target=ticker, daemon=True).start()
@@ -1129,6 +1202,10 @@ def serve():
         server.serve_forever()
     finally:
         if player.mpv:
+            try:
+                player.save_session()  # the exact position, not up to 5 s old
+            except Exception:
+                pass
             player.mpv.quit()
 
 
