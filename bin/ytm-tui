@@ -62,7 +62,7 @@ def hue_colors(seed):
 ICON = {
     "play": "\U000F040A", "pause": "\U000F03E4", "prev": "\U000F04AE", "next": "\U000F04AD",
     "shuffle": "\U000F049D", "repeat": "\U000F0456", "repeatOne": "\U000F0458",
-    "like": "\U000F02D1", "likeOff": "\U000F02D5", "dislike": "\U000F02D4", "dislikeOff": "\U000F0D14",
+    "like": "\U000F02D1", "likeOff": "\U000F02D5", "dislike": "\U000F0759", "dislikeOff": "\U000F1434",
     "volume": "\U000F057E", "muted": "\U000F075F", "search": "\U000F0349", "settings": "\U000F062E",
     "moon": "\U000F0594", "chevron": "\U000F0142", "up": "\U000F005D", "close": "\U000F0156",
     "account": "\U000F0004", "music": "\U000F075A", "back": "\U000F004D",

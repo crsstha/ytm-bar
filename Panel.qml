@@ -130,8 +130,8 @@ Panel {
   readonly property var icons: ({
     search: "M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-3.5-3.5",
     settings: "M4 7h10M18 7h2M4 17h4M12 17h8M14 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M8 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
-    // Like is a heart (filled once liked); dislike, a broken heart.
-    dislike: "M19.5 12.572l-7.5 7.428l-7.5-7.428a5 5 0 1 1 7.5-6.566a5 5 0 1 1 7.5 6.572M12 6l-2 4l4 3l-2 4v3",
+    // Like is a heart (filled once liked); dislike, a heart struck through.
+    dislike: "M3 3l18 18M19.5 12.572l-1.5 1.428m-2 2l-4 4l-7.5-7.428a5 5 0 0 1-1.288-5.068a4.976 4.976 0 0 1 1.788-2.504m3-1c1.56 0 3.05.727 4 2a5 5 0 1 1 7.5 6.572",
     like: "M19.5 12.572l-7.5 7.428l-7.5-7.428a5 5 0 1 1 7.5-6.566a5 5 0 1 1 7.5 6.572",
     likeFill: "M19.5 12.572l-7.5 7.428l-7.5-7.428a5 5 0 1 1 7.5-6.566a5 5 0 1 1 7.5 6.572",
     shuffle: "M3 6h3l11 12h4M3 18h3l3-3.3M14 9.3L17 6h4M18 3l3 3-3 3M18 15l3 3-3 3",
