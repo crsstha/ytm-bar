@@ -76,7 +76,7 @@ or `omarchy-shell crsstha.ytmusic search "daft punk"`.
   play, and drives it over its JSON IPC socket. mpv's playlist is the queue.
   It serves a small JSON API on `127.0.0.1:26539`; every request must carry an
   `X-Ytm-Bar` header, so web pages can't drive it.
-- `omarchy/Panel.qml` calls the service directly (`POST /<command>`), and polls
+- `Panel.qml` calls the service directly (`POST /<command>`), and polls
   `GET /song` for the live display: every second while
   music plays or the popup is open, otherwise every 2 s, or every 5 s while the
   service is stopped.
@@ -127,7 +127,7 @@ or `omarchy-shell crsstha.ytmusic search "daft punk"`.
 The popup follows the "Mini Player" design: dark glass with a warm glow, a
 segmented tab bar, and the design's own icons (SVG paths drawn with Qt Shapes).
 It uses the [Geist](https://github.com/vercel/geist-font) fonts, bundled in
-`omarchy/fonts/` under the SIL Open Font License (`omarchy/fonts/OFL.txt`).
+`fonts/` under the SIL Open Font License (`fonts/OFL.txt`).
 
 ## Tests
 
