@@ -416,6 +416,19 @@ def mood_items(shelf_items):
     return out
 
 
+def close_window(proc):
+    """Close a browser window the way its ✕ does (Hyprland), so it saves
+    everything; without Hyprland, ask the process to quit."""
+    try:
+        done = subprocess.run(["hyprctl", "dispatch", f'hl.dsp.window.close({{ window = "pid:{proc.pid}" }})'],
+                              capture_output=True, text=True, timeout=3)
+        if done.returncode == 0 and "error" not in done.stdout.lower():
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    proc.terminate()
+
+
 def window_title(pid):
     """The title of the Hyprland window that process `pid` owns, or ""."""
     try:
@@ -1122,18 +1135,31 @@ class Player:
         cookies at once, instead of on its own every ~30 s. Without Hyprland,
         the profile is just checked until the cookies turn up."""
         error, tried, started = "The window closed before you signed in", None, time.monotonic()
+        closing = False
         while True:
             closed = proc.poll() is not None
-            if not closed and window_title(proc.pid) == SIGNIN_DONE_TITLE:
+            if not closed and not closing and window_title(proc.pid) == SIGNIN_DONE_TITLE:
+                closing = True
                 self.signin_stage = "finishing"
-                time.sleep(1)  # let YouTube Music finish setting its cookies
-                proc.terminate()
+                time.sleep(3)  # let YouTube Music finish setting its cookies
+                # Close it as if you'd clicked ✕, so Chromium shuts down
+                # properly and saves its cookies. Never kill it: a killed
+                # Chromium can lose the whole sign-in.
+                close_window(proc)
                 try:
-                    proc.wait(10)
+                    proc.wait(30)
+                    closed = True
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                closed = True
+                    pass  # still saving: keep checking, it'll close
             # Read the profile now and then while you sign in, and once it's closed.
+            if closed:
+                for _ in range(5):  # the file may still be settling
+                    try:
+                        if profile_headers(SIGNIN_PROFILE):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
             if closed or time.monotonic() - started > 20:
                 try:
                     headers = profile_headers(SIGNIN_PROFILE)
@@ -1153,7 +1179,7 @@ class Player:
                 break
             time.sleep(1)
         if proc.poll() is None:
-            proc.terminate()  # signed in: close the window
+            close_window(proc)  # signed in: close the window
         self.signin_error = error
         self.signin_stage = ""
         self._signin = None
