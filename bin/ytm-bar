@@ -372,6 +372,40 @@ def rss_mb(pid):
     return 0
 
 
+def runs_text(node):
+    return "".join(run.get("text", "") for run in (node or {}).get("runs", []))
+
+
+def mood_items(shelf_items):
+    """A mood page's shelf items, read leniently into the dicts entries_of()
+    understands; anything unrecognised is skipped (ytmusicapi's own parser
+    gives up on the whole page instead, e.g. on a video shelf)."""
+    out = []
+    for wrapper in shelf_items:
+        two_row = wrapper.get("musicTwoRowItemRenderer")
+        listed = wrapper.get("musicResponsiveListItemRenderer")
+        try:
+            if two_row:
+                nav = two_row.get("navigationEndpoint") or {}
+                thumbs = two_row["thumbnailRenderer"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"]
+                item = {"title": runs_text(two_row.get("title")), "thumbnails": thumbs}
+                if "watchEndpoint" in nav:
+                    item.update(videoId=nav["watchEndpoint"]["videoId"], resultType="video",
+                                artists=[{"name": runs_text(two_row.get("subtitle")).split(" • ")[0]}])
+                else:
+                    item["browseId"] = nav["browseEndpoint"]["browseId"]
+                out.append(item)
+            elif listed:
+                columns = [runs_text(c["musicResponsiveListItemFlexColumnRenderer"].get("text"))
+                           for c in listed.get("flexColumns", [])]
+                out.append({"videoId": listed["playlistItemData"]["videoId"], "title": columns[0],
+                            "artists": [{"name": columns[1]}] if len(columns) > 1 and columns[1] else [],
+                            "thumbnails": listed["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"]})
+        except (KeyError, IndexError, TypeError):
+            continue
+    return out
+
+
 def video_id_of(url):
     match = re.search(r"[?&]v=([\w-]{11})", url or "")
     return match.group(1) if match else None
@@ -783,6 +817,43 @@ class Player:
             self._browse = (time.monotonic(), stamp, sections)
         return {"sections": sections}
 
+    def mood_page(self, params):
+        """A mood or genre: its shelves (songs, playlists, videos, albums)."""
+        try:
+            response = self.yt()._send_request(
+                "browse", {"browseId": "FEmusic_moods_and_genres_category", "params": params})
+        except ApiError:
+            raise
+        except Exception as e:
+            raise ApiError("failed", f"YouTube Music: {e}")
+        sections, count = [], 0
+
+        def walk(node):
+            nonlocal count
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in ("musicCarouselShelfRenderer", "gridRenderer"):
+                        header = value.get("header") or {}
+                        title = runs_text((header.get("musicCarouselShelfBasicHeaderRenderer")
+                                           or header.get("gridHeaderRenderer") or {}).get("title"))
+                        items = mood_items(value.get("contents") or value.get("items") or [])
+                        self.remember([i for i in items if i.get("videoId")])
+                        rows = entries_of(items, 20)
+                        if rows:
+                            sections.append({"title": title or "Playlists", "items": rows})
+                            count += len(rows)
+                    else:
+                        walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+        walk(response)
+        if not sections:
+            raise ApiError("failed", "Nothing to show for this one")
+        return {"type": "mood", "id": params, "title": self._mood_titles.get(params, "Browse"),
+                "image": "", "subtitle": f"{len(sections)} shelves · {count} items", "owned": True,
+                "sections": sections}
+
     def library(self, args):
         if not self.logged_in:
             raise ApiError("unauthorized", "Log in (Settings) to see your library")
@@ -872,10 +943,7 @@ class Player:
                                        f"{count} songs" if count else ""),
                     "sections": [{"title": "Songs", "items": rows}]}
         if kind == "mood":
-            rows = entries_of(self.call("get_mood_playlists", item_id), 60)
-            return {"type": kind, "id": item_id, "title": self._mood_titles.get(item_id, "Playlists"),
-                    "image": "", "subtitle": f"{len(rows)} playlists", "owned": True,
-                    "sections": [{"title": "Playlists", "items": rows}]}
+            return self.mood_page(item_id)
         if kind == "playlist":
             playlist = self.call("get_playlist", item_id, limit=COLLECTION_LIMIT)
             self.collections[kind, item_id] = self.remember(playlist.get("tracks"))
