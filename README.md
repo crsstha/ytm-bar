@@ -5,13 +5,14 @@ YouTube Music in the [Omarchy](https://omarchy.org/) bar — no app, no browser 
 <img src="docs/pill.png" alt="The now-playing pill in the bar" height="26">
 
 <p>
-  <img src="docs/popup.png" alt="The player popup" width="380">
-  <img src="docs/tui.png" alt="ytm-tui in a terminal" width="430">
+  <img src="docs/popup.png" alt="The player: cover, waveform seek bar, controls and the up-next covers" width="380">
+  <img src="docs/search.png" alt="Search before you type: moods and genres to browse" width="380">
 </p>
 
-A now-playing pill and a player popup with search, your library, home, likes,
-an editable queue, sleep timer, equalizer and volume boost — plus `ytm-tui`, the
-same player in a terminal. Search and radio come from
+A now-playing pill and a player popup that takes its colour from the cover:
+a waveform seek bar, the up-next queue as covers, search with moods and genres
+to browse, your saved music and playlists, likes, a sleep timer, equalizer and
+volume boost — plus `ytm-tui`, the same player in a terminal. Search and radio come from
 [ytmusicapi](https://github.com/sigma67/ytmusicapi); audio plays through
 [mpv](https://mpv.io/) + [yt-dlp](https://github.com/yt-dlp/yt-dlp) in a small
 user service.
@@ -42,8 +43,9 @@ seconds. No Chromium? Use **Paste headers** instead.
 
 - **Playing** — controls, volume and the up-next queue (drag to reorder, hover to
   play next or remove). The radio for the current song keeps the queue going.
-- **Search · Saved · For you** — click a song to play it; albums, artists and
-  playlists open as a page.
+- **Search** — recent searches and mood and genre tiles before you type, then
+  results by type. **Saved · For you** — your library and YouTube's picks.
+  Click a song to play it; albums, artists, playlists and moods open as a page.
 - **Playlists** — the playlist button next to the hearts adds the current song
   to one of your playlists, or to a new one; **Saved → New playlist** makes an
   empty one. New playlists are private. On someone else's playlist (say, from
@@ -55,8 +57,11 @@ where you left it.
 
 ### In a terminal
 
-Run `ytm-tui` (or Settings → **Open in TUI**). The key hints are always at the
-bottom; the main ones:
+<img src="docs/tui.png" alt="ytm-tui: now playing, the queue and the key hints" width="640">
+
+Run `ytm-tui` (or Settings → **Open in TUI**, which opens it as a floating
+window in the middle of the screen). The key hints are always at the bottom;
+the main ones:
 
 | Keys | |
 |---|---|
