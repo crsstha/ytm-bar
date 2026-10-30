@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "crsstha.ytmusic",
   "name": "YouTube Music",
-  "version": "2.1.0",
+  "version": "1.0.0",
   "author": "crsstha",
   "license": "MIT",
   "description": "Now playing in YouTube Music with controls, search and the up-next queue. Plays through mpv + yt-dlp, with ytmusicapi for search and radio; bin/ytm-bar runs the player service.",
