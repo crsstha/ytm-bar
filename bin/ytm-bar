@@ -81,7 +81,7 @@ SESSION_LIMIT = 200  # songs kept
 MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock"
 SERVICE = "ytm-bar.service"
 WATCH_URL = "https://music.youtube.com/watch?v="
-QUEUE_LIMIT = 10
+QUEUE_LIMIT = 100  # songs after the current one sent to the popup and ytm-tui
 RADIO_LIMIT = 25
 RADIO_AHEAD = 3  # fetch more radio when this few songs are left
 COLLECTION_LIMIT = 100
