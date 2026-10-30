@@ -2343,39 +2343,41 @@ Panel {
 
                     Repeater {
                       model: browseSection.modelData.items
-                      // A tile in the mood's own colour, with a brighter edge.
+                      // A glass tile like the rest of the card; the accent shows on hover.
                       delegate: Rectangle {
                         id: tile
                         required property var modelData
-                        readonly property real hue: root.hueOf(modelData.title)
                         width: (browseSection.width - 8) / 2
-                        height: 48
+                        height: 44
                         radius: 12
-                        clip: true
                         scale: tileArea.pressed ? 0.97 : 1
-                        gradient: Gradient {
-                          orientation: Gradient.Horizontal
-                          GradientStop { position: 0; color: Qt.hsla(tile.hue, 0.45, tileArea.containsMouse ? 0.36 : 0.3, 0.9) }
-                          GradientStop { position: 1; color: Qt.hsla(tile.hue, 0.35, 0.16, 0.7) }
-                        }
+                        color: tileArea.containsMouse ? root.white(0.08) : root.white(0.04)
                         border.width: 1
-                        border.color: root.white(tileArea.containsMouse ? 0.16 : 0.07)
+                        border.color: tileArea.containsMouse ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.55)
+                                                             : root.white(0.08)
 
-                        Rectangle {
-                          width: 4
-                          height: parent.height
-                          color: Qt.hsla(tile.hue, 0.7, 0.68, 1)
-                        }
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        Behavior on border.color { ColorAnimation { duration: 120 } }
+
                         Label {
                           anchors.left: parent.left
-                          anchors.leftMargin: 16
-                          anchors.right: parent.right
-                          anchors.rightMargin: 10
+                          anchors.leftMargin: 14
+                          anchors.right: tileChevron.left
+                          anchors.rightMargin: 8
                           anchors.verticalCenter: parent.verticalCenter
                           text: tile.modelData.title
-                          weight: Font.DemiBold
+                          weight: Font.Medium
                           font.pixelSize: 13
-                          color: "#ffffff"
+                          color: tileArea.containsMouse ? "#ffffff" : root.white(0.85)
+                        }
+                        Icon {
+                          id: tileChevron
+                          anchors.right: parent.right
+                          anchors.rightMargin: 12
+                          anchors.verticalCenter: parent.verticalCenter
+                          name: "chevron"
+                          size: 12
+                          color: tileArea.containsMouse ? root.accent : root.white(0.3)
                         }
                         MouseArea {
                           id: tileArea
@@ -2408,7 +2410,7 @@ Panel {
                   model: 8
                   delegate: Rectangle {
                     width: (parent.width - 8) / 2
-                    height: 48
+                    height: 44
                     radius: 12
                     color: root.white(0.06)
                   }
