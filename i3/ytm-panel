@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""The ytm-bar player popup on i3: the Omarchy popup (Panel.qml), ported to
+HTML (i3/panel.html) and shown in a WebKit window at the top right, under the
+bar. Click outside or press Esc to close it.
+
+  ytm-panel           open (or close, if it's open)
+  ytm-panel search    open in the search box
+
+One instance: running it again toggles the open window. Needs webkit2gtk-4.1
+and python-gobject.
+
+  YTM_PANEL_OFFSET  pixels between the top of the monitor and the popup (default 34)
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# WebKit's DMA-BUF renderer draws a blank window on some X11/NVIDIA setups.
+os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+
+import cairo  # noqa: E402
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("WebKit2", "4.1")
+from gi.repository import Gdk, Gio, GLib, Gtk, WebKit2  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+CLI = str(HERE.parent / "bin" / "ytm-bar")
+API = f"http://127.0.0.1:{os.environ.get('YTM_BAR_PORT', '26539')}"
+HEADER = "X-Ytm-Bar"
+WIDTH = 420
+RADIUS = 22  # the card's corners (panel.html)
+EDGE_GAP = 8  # pixels between the popup and the monitor's right edge
+TOP_OFFSET = int(os.environ.get("YTM_PANEL_OFFSET", "34"))
+SLOW = {"search", "home", "library", "open", "playall", "login", "account"}
+
+
+def request(method, path, body=None, timeout=10):
+    """(HTTP status, JSON body) from the service; status 0 when it isn't running."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, data=data, method=method,
+                                 headers={HEADER: "1", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (urllib.error.URLError, ConnectionError, TimeoutError, ValueError):
+        return 0, None
+
+
+def song():
+    status, body = request("GET", "/song", timeout=2)
+    if status == 200:
+        return {"status": "ok", "song": body}
+    return {"status": "idle" if status == 204 else "offline", "song": None}
+
+
+def command(name, args):
+    status, body = request("POST", "/" + name, {"args": args}, timeout=60 if name in SLOW else 10)
+    if status == 0:
+        return {"ok": False, "error": "The player service isn't running"}
+    return body or {"ok": False, "error": "The player service sent a bad reply"}
+
+
+def terminal(*argv):
+    if shutil.which("kitty"):
+        return ["kitty", *argv]
+    return ["alacritty", "-e", *argv]
+
+
+class Panel(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="YouTube Music")
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)  # i3 floats dialogs
+        # Opaque, not see-through: picom showed a see-through (ARGB) window
+        # only in patches, keeping stale pixels wherever it hadn't repainted.
+        # The shape mask (place) still gives the card its rounded corners.
+        self.height = 200
+        self.set_size_request(WIDTH, self.height)
+        self.anchor = None  # (monitor right edge, top)
+        self.hidden_at = 0.0
+
+        manager = WebKit2.UserContentManager()
+        manager.register_script_message_handler("ytm")
+        manager.connect("script-message-received::ytm", self.on_message)
+        self.view = WebKit2.WebView.new_with_user_content_manager(manager)
+        self.view.set_background_color(Gdk.RGBA(0.07, 0.08, 0.09, 1))  # under the card's tint
+        settings = self.view.get_settings()
+        settings.set_allow_file_access_from_file_urls(True)  # the Geist fonts in ../fonts
+        settings.set_enable_developer_extras(bool(os.environ.get("YTM_PANEL_DEBUG")))
+        self.view.connect("context-menu", lambda *a: not os.environ.get("YTM_PANEL_DEBUG"))
+        self.loaded = False
+        self.shown_tab = None  # ytmShown() waits for the page on the first open
+        self.view.connect("load-changed", self.on_load)
+        self.view.load_uri((HERE / "panel.html").as_uri())
+        self.add(self.view)
+
+        self.connect("notify::is-active", self.on_active_changed)
+        self.connect("delete-event", lambda *a: self.close_panel() or True)
+        self.connect("size-allocate", lambda *a: self.place())
+
+    # ---- The bridge: panel.html posts {id, cmd, args}; commands starting
+    # with "_" are for this window, the rest go to the service.
+
+    def on_message(self, manager, result):
+        value = result.get_js_value() if hasattr(result, "get_js_value") else result
+        msg = json.loads(value.to_string())
+        cmd, args = msg["cmd"], msg.get("args") or []
+        if cmd == "_close":
+            self.close_panel()
+        elif cmd == "_size":
+            self.fit(int(args[0]))
+        elif cmd == "_tui":
+            subprocess.Popen(terminal("ytm-tui"), start_new_session=True)
+            self.close_panel()
+        else:
+            threading.Thread(target=self.answer, args=(msg["id"], cmd, args), daemon=True).start()
+
+    def answer(self, id, cmd, args):
+        result = song() if cmd == "_song" else command(cmd, args)
+        GLib.idle_add(self.js, f"ytmReply({id}, {json.dumps(result)})")
+
+    def on_load(self, view, event):
+        if event == WebKit2.LoadEvent.FINISHED and not self.loaded:
+            self.loaded = True
+            if self.get_visible():
+                self.js(f"ytmShown({json.dumps(self.shown_tab)})")
+
+    def js(self, script):
+        self.view.evaluate_javascript(script, -1, None, None, None, None, None)
+        return False
+
+    # ---- Size, shape and place.
+
+    def fit(self, height):
+        if height <= 0 or height == self.height:
+            return
+        self.height = height
+        self.set_size_request(WIDTH, height)
+        self.resize(WIDTH, height)
+        self.place()
+
+    def place(self):
+        w, h = self.get_size()
+        # Clip the window to the card's rounded corners.
+        mask = cairo.ImageSurface(cairo.FORMAT_A1, w, h)
+        cr = cairo.Context(mask)
+        r = RADIUS
+        cr.new_sub_path()
+        cr.arc(w - r, r, r, -1.5708, 0)
+        cr.arc(w - r, h - r, r, 0, 1.5708)
+        cr.arc(r, h - r, r, 1.5708, 3.14159)
+        cr.arc(r, r, r, 3.14159, 4.71239)
+        cr.close_path()
+        cr.fill()
+        self.shape_combine_region(Gdk.cairo_region_create_from_surface(mask))
+        if self.anchor:
+            right, top = self.anchor
+            x = right - w - EDGE_GAP
+            if self.get_position() != (x, top):
+                self.move(x, top)
+
+    # ---- Show and hide.
+
+    def open_panel(self, tab):
+        display = Gdk.Display.get_default()
+        _, x, y = display.get_default_seat().get_pointer().get_position()
+        geo = display.get_monitor_at_point(x, y).get_geometry()
+        self.anchor = (geo.x + geo.width, geo.y + TOP_OFFSET)
+        # Start the service if it's stopped (it saves and restores the queue).
+        threading.Thread(target=subprocess.run, args=([CLI, "start"],),
+                         kwargs={"capture_output": True}, daemon=True).start()
+        self.place()
+        self.show_all()
+        self.present_with_time(Gdk.CURRENT_TIME)
+        self.place()  # again after map: some WMs ignore the first
+        self.view.grab_focus()
+        self.shown_tab = tab
+        if self.loaded:
+            self.js(f"ytmShown({json.dumps(tab)})")
+
+    def close_panel(self):
+        if self.get_visible():
+            self.hide()
+            self.hidden_at = time.monotonic()
+            self.js("ytmHidden()")
+
+    def on_active_changed(self, *args):
+        # Close when focus moves elsewhere, like a popup.
+        if not self.is_active():
+            GLib.timeout_add(150, lambda: self.is_active() or self.close_panel() or False)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.ytmbar.Panel", flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.window = None
+
+    def do_command_line(self, command_line):
+        args = command_line.get_arguments()[1:]
+        tab = "search" if "search" in args else None
+        if self.window is None:
+            self.window = Panel(self)
+            self.hold()  # stay running while hidden, so it opens instantly next time
+        win = self.window
+        # Clicking the bar to close it: focus left first and already closed it.
+        if time.monotonic() - win.hidden_at < 0.4:
+            return 0
+        if win.get_visible() and not tab:
+            win.close_panel()
+        else:
+            win.open_panel(tab)
+        return 0
+
+
+if __name__ == "__main__":
+    GLib.set_prgname("ytm-panel")  # X11 class "Ytm-panel", used by the i3 rule
+    sys.exit(App().run(sys.argv))

@@ -1,0 +1,770 @@
+<!doctype html>
+<!-- The player popup for i3, a port of Panel.qml (same layout, colours and
+     icons). i3/ytm-panel shows it in a WebKit window and relays every call to
+     the ytm-bar service: the service refuses requests from web pages. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>YouTube Music</title>
+<style>
+@font-face { font-family: Geist; src: url("../fonts/Geist.ttf"); font-weight: 100 900; }
+@font-face { font-family: GeistMono; src: url("../fonts/GeistMono.ttf"); font-weight: 100 900; }
+:root { --accent: #f3c98b; --ink: #f2f2f0; --radius: 22px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: transparent; overflow: hidden; }
+body { font: 13px Geist, sans-serif; color: var(--ink); user-select: none; -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+svg { display: block; flex: none; }
+
+#card {
+  width: 420px; max-height: 720px; display: flex; flex-direction: column; overflow: hidden;
+  border-radius: var(--radius);
+  /* The warm glow from the top-left corner over the tint. On i3 the window
+     is opaque (i3/ytm-panel), so this is a solid dark card. */
+  background: radial-gradient(circle 190px at 130px 30px, rgba(233,170,90,.22), transparent),
+              rgba(18,20,24,.88);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+}
+#scroll { overflow-y: auto; min-height: 0; flex: 1; }
+::-webkit-scrollbar { width: 0; }  /* scroll with the wheel, like the QML Flickables */
+
+.mono { font-family: GeistMono, monospace; font-size: 11px; color: rgba(255,255,255,.5); }
+.sh { font-size: 11px; font-weight: 600; letter-spacing: .9px; text-transform: uppercase; color: rgba(255,255,255,.45); }
+.note { padding: 22px 18px; text-align: center; color: rgba(255,255,255,.45); line-height: 1.35; }
+.ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg { padding: 12px 18px 0; font-size: 12px; color: var(--accent); }
+
+/* ---- Header: the tabs and Settings. */
+#header { display: flex; gap: 10px; padding: 12px 12px 0; flex: none; }
+#segments { flex: 1; display: flex; gap: 2px; padding: 2px; height: 36px; border-radius: 12px;
+  background: rgba(255,255,255,.05); box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
+#segments button { flex: 1; height: 30px; margin-top: 1px; border-radius: 9px; font-weight: 500; color: rgba(255,255,255,.6); }
+#segments button:hover, #segments button.on { color: #fff; }
+#segments button.on { background: rgba(255,255,255,.12); }
+.ib { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 10px; color: rgba(255,255,255,.55); }
+.ib:hover { background: rgba(255,255,255,.08); }
+.ib.on { color: var(--accent); }
+#settings-btn { width: 36px; height: 36px; color: rgba(255,255,255,.6); }
+#settings-btn:hover, #settings-btn.on { color: #fff; }
+#settings-btn.on { background: rgba(255,255,255,.12); }
+
+/* ---- Pills and chips. */
+.pill { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; border-radius: 16px;
+  font-weight: 500; color: var(--ink); background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.pill:hover { background: rgba(255,255,255,.12); }
+.pill.primary { color: #111; background: rgba(255,255,255,.92); box-shadow: none; }
+.pill.primary:hover { background: #fff; }
+.pill:active { transform: scale(.96); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px 0; }
+.chip { height: 26px; padding: 0 11px; border-radius: 13px; font-size: 12px; font-weight: 500; color: rgba(255,255,255,.6);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
+.chip:hover { background: rgba(255,255,255,.06); color: #fff; }
+.chip.on { background: rgba(255,255,255,.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,.1); color: #fff; }
+
+/* ---- Cover art: a gradient in the title's hue under the image. */
+.art { position: relative; flex: none; overflow: hidden; }
+.art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.art::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px rgba(255,255,255,.1); }
+
+/* ---- Rows: songs, albums, artists, playlists, queue items. */
+.sections { padding: 10px 8px; }
+.section .sh { padding: 8px 10px 6px; }
+.row { position: relative; display: flex; align-items: center; gap: 12px; padding: 6px 8px 6px 6px; margin-bottom: 1px;
+  border-radius: 12px; cursor: pointer; }
+.row:hover { background: rgba(255,255,255,.06); }
+.row.cur { background: rgba(255,255,255,.07); cursor: default; }
+.row.editable { cursor: grab; }
+.row .txt { flex: 1; min-width: 0; }
+.row .t { font-weight: 500; color: rgba(255,255,255,.92); }
+.row.large .t { font-size: 15px; font-weight: 600; }
+.row.playing .t { color: var(--accent); }
+.row .s { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 1px; }
+.trail { flex: none; display: flex; align-items: center; justify-content: flex-end; min-width: 28px; height: 28px; color: rgba(255,255,255,.35); }
+.len { padding-right: 4px; color: rgba(255,255,255,.4); }
+.ib.sm { width: 28px; height: 28px; border-radius: 8px; }
+.trail .next, .trail .qa { display: none; }
+.row:hover .trail .next { display: inline-flex; color: var(--ink); }
+.row:hover .trail .qa { display: flex; gap: 2px; }
+.row.playable:hover .len, .row.editable:hover .len { display: none; }
+.qa .ib { background: rgba(255,255,255,.06); color: rgba(255,255,255,.8); }
+.qa .ib:hover { background: rgba(255,255,255,.14); color: #fff; }
+.qa .rm:hover { background: rgba(255,90,90,.22); }
+body.dragging .row:hover { background: none; }
+body.dragging .row .qa, body.dragging .row .next { display: none !important; }
+body.dragging, body.dragging .row { cursor: grabbing; }
+.row.from { opacity: .4; }
+.row.over::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; border-radius: 1px; background: var(--accent); }
+
+/* ---- Now. */
+.np { display: flex; align-items: center; gap: 14px; padding: 18px 18px 0; }
+.np .meta { flex: 1; min-width: 0; }
+.np .title { font-size: 17px; font-weight: 600; letter-spacing: -.17px; }
+.np .artist { color: rgba(255,255,255,.7); margin-top: 3px; }
+.np .album { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 3px; }
+.rating { display: flex; gap: 2px; }
+.progress { padding: 18px 18px 0; }
+.times { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; height: 18px; }
+.sleep { display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 8px; border-radius: 9px;
+  background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); color: var(--accent); }
+.sleep:hover { background: rgba(255,255,255,.12); }
+.sleep .mono { font-size: 10px; color: var(--accent); }
+.sleep .x { color: rgba(255,255,255,.4); }
+.controls { display: flex; align-items: center; justify-content: space-between; padding: 10px 26px 0; height: 66px; }
+.controls .ib { border-radius: 50%; }
+.controls .side { width: 36px; height: 36px; }
+.controls .skip { width: 44px; height: 44px; color: #fff; }
+.play { width: 56px; height: 56px; border-radius: 50%; background: #fff; color: #111; display: flex; align-items: center; justify-content: center; transition: transform 90ms; }
+.play:active { transform: scale(.95); }
+.volume { display: flex; align-items: center; gap: 6px; padding: 6px 20px 14px 14px; }
+.volume .ib { width: 28px; height: 28px; border-radius: 8px; }
+.volume .track { flex: 1; margin-right: 6px; }
+.volume .mono { width: 44px; text-align: right; }
+.volume.muted .track { opacity: .4; }
+
+/* The slim track: 4px rail, fill, boost and the knob. */
+.track { position: relative; height: 16px; cursor: pointer; }
+.track > div { position: absolute; top: 6px; height: 4px; border-radius: 2px; }
+.track .rail { left: 0; right: 0; background: rgba(255,255,255,.12); }
+.track .fill { left: 0; background: rgba(255,255,255,.6); }
+.track.grad .fill { background: linear-gradient(90deg, rgba(255,255,255,.75), #fff); }
+.track .boost { background: var(--accent); }
+.track .unity { top: 3px; width: 2px; height: 10px; border-radius: 1px; background: rgba(255,255,255,.35); margin-left: -1px; }
+.track .knob { top: -2px; width: 20px; height: 20px; border-radius: 10px; margin-left: -10px; background: rgba(255,255,255,.12); }
+.track .knob::after { content: ""; position: absolute; left: 4px; top: 4px; width: 12px; height: 12px; border-radius: 6px; background: #fff; }
+
+.queue { background: rgba(0,0,0,.18); border-top: 1px solid rgba(255,255,255,.07); padding: 14px 0 8px; }
+.queue .head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 18px 8px; }
+.queue .head .mono { color: rgba(255,255,255,.35); }
+.queue-list { padding: 0 8px; max-height: 265px; overflow-y: auto; }
+
+/* ---- Search. */
+.search { position: relative; margin: 14px 12px 0; }
+.search svg { position: absolute; left: 13px; top: 13px; color: rgba(255,255,255,.45); }
+.search input { width: 100%; height: 40px; padding: 0 12px 0 36px; border-radius: 12px; border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.06); color: #fff; font: 13px Geist, sans-serif; outline: none; caret-color: var(--accent); }
+.search input:focus { border-color: rgba(255,255,255,.18); }
+.search input::placeholder { color: rgba(255,255,255,.38); }
+
+/* ---- An album, artist or playlist page. */
+.page { display: flex; align-items: center; gap: 14px; padding: 18px 18px 0; }
+.page .meta { flex: 1; min-width: 0; }
+.page .title { font-size: 17px; font-weight: 600; letter-spacing: -.17px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.page .sub { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 4px; }
+.page .btns { display: flex; gap: 8px; margin-top: 8px; }
+
+/* ---- Settings. */
+.settings { padding: 18px 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.settings .gap { height: 10px; }
+.settings .hrow { display: flex; justify-content: space-between; align-items: baseline; }
+.settings .hrow .mono { color: var(--accent); }
+.opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.opt { height: 32px; padding: 0 12px; border-radius: 16px; font-size: 12px; font-weight: 500; color: rgba(255,255,255,.8);
+  background: rgba(255,255,255,.04); box-shadow: inset 0 0 0 1px rgba(255,255,255,.1); }
+.opt:hover { box-shadow: inset 0 0 0 1px rgba(255,255,255,.3); }
+.opt.on { background: var(--accent); color: #111; box-shadow: none; }
+.eq { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.eq button { padding: 10px; border-radius: 12px; text-align: left; background: rgba(255,255,255,.03); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.eq button:hover { box-shadow: inset 0 0 0 1px rgba(255,255,255,.3); }
+.eq button.on { background: rgba(255,255,255,.1); box-shadow: inset 0 0 0 1px var(--accent); }
+.eq .bars { display: flex; gap: 3px; align-items: center; height: 24px; }
+.eq .bars i { flex: 1; border-radius: 2px; background: rgba(255,255,255,.35); }
+.eq .on .bars i { background: var(--accent); }
+.eq .lbl { margin-top: 8px; font-size: 12px; font-weight: 500; color: rgba(255,255,255,.75); }
+.eq .on .lbl { color: #fff; }
+.card { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border-radius: 12px; text-align: left;
+  background: rgba(255,255,255,.04); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+.card:hover { background: rgba(255,255,255,.07); }
+.card .txt { flex: 1; min-width: 0; }
+.card .t { font-weight: 500; }
+.card .s { font-size: 12px; color: rgba(255,255,255,.45); margin-top: 2px; }
+.switch { position: relative; flex: none; width: 36px; height: 20px; border-radius: 10px; background: rgba(255,255,255,.15); }
+.switch::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 8px; background: #fff; transition: left 120ms cubic-bezier(.33,1,.68,1); }
+.switch.on { background: var(--accent); }
+.switch.on::after { left: 18px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex: none;
+  background: rgba(0,0,0,.4); box-shadow: inset 0 0 0 1px rgba(255,255,255,.1); font: 12px GeistMono, monospace; color: var(--accent); }
+.account { display: flex; align-items: center; gap: 12px; }
+.account .txt { flex: 1; min-width: 0; }
+.small { font-size: 12px; line-height: 1.45; color: rgba(255,255,255,.7); }
+.fine { font-size: 11px; color: rgba(255,255,255,.4); line-height: 1.4; }
+.err { font-size: 12px; color: var(--accent); }
+textarea { width: 100%; height: 110px; padding: 10px; border-radius: 12px; resize: none; outline: none; border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.06); color: #fff; font: 11px GeistMono, monospace; word-break: break-all; }
+textarea:focus { border-color: rgba(255,255,255,.18); }
+textarea::placeholder { color: rgba(255,255,255,.38); font-family: Geist, sans-serif; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="card">
+  <div id="header">
+    <div id="segments"></div>
+    <button class="ib" id="settings-btn" data-tab="settings"></button>
+  </div>
+  <div id="scroll"><div id="content"></div></div>
+</div>
+<script>
+"use strict"
+// ---- The design's icons: SVG paths on a 24×24 grid. "Fill" icons are solid.
+const ICONS = {
+  search: "M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-3.5-3.5",
+  settings: "M4 7h10M18 7h2M4 17h4M12 17h8M14 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M8 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
+  dislike: "M17 14V3M10 14l1 6a2 2 0 0 0 2 1l4-7h3V3H7a3 3 0 0 0-3 2.5L3 11a2 2 0 0 0 2 3h5z",
+  like: "M7 10v11M14 10l-1-6a2 2 0 0 0-2-1l-4 7H4v11h13a3 3 0 0 0 3-2.5l1-5.5a2 2 0 0 0-2-3h-5z",
+  shuffle: "M3 6h3l11 12h4M3 18h3l3-3.3M14 9.3L17 6h4M18 3l3 3-3 3M18 15l3 3-3 3",
+  repeat: "M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4",
+  repeatOne: "M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4M11 10.5l1.2-1V14.5",
+  previousFill: "M6 5h2v14H6zM20 5v14L9 12z",
+  nextFill: "M16 5h2v14h-2zM4 5v14l11-7z",
+  playFill: "M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z",
+  pauseFill: "M7.2 5h1.6a1.2 1.2 0 0 1 1.2 1.2v11.6a1.2 1.2 0 0 1-1.2 1.2H7.2A1.2 1.2 0 0 1 6 17.8V6.2A1.2 1.2 0 0 1 7.2 5zM15.2 5h1.6a1.2 1.2 0 0 1 1.2 1.2v11.6a1.2 1.2 0 0 1-1.2 1.2h-1.6a1.2 1.2 0 0 1-1.2-1.2V6.2A1.2 1.2 0 0 1 15.2 5z",
+  volume: "M11 5L6 9H3v6h3l5 4zM15.5 9a4 4 0 0 1 0 6",
+  muted: "M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5",
+  chevron: "M9 6l6 6-6 6",
+  back: "M15 6l-6 6 6 6",
+  playNext: "M3 6h12M3 12h12M3 18h8M18 14v8M14 18h8",
+  account: "M4 21a8 8 0 0 1 16 0M8 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0",
+  moon: "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z",
+  up: "M12 19V5M6 11l6-6 6 6",
+  close: "M6 6l12 12M18 6L6 18",
+  logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+}
+function icon(name, size = 16, stroke = 2) {
+  const paint = name.endsWith("Fill") ? 'fill="currentColor"'
+    : `fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round"`
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24"><path d="${ICONS[name]}" ${paint}/></svg>`
+}
+
+const TABS = [["now", "Now"], ["search", "Search"], ["library", "Library"], ["home", "Home"]]
+const FILTERS = [["all", "All"], ["songs", "Songs"], ["albums", "Albums"], ["artists", "Artists"], ["playlists", "Playlists"], ["videos", "Videos"]]
+const SLEEP = [["off", "Off"], ["15", "15 min"], ["30", "30 min"], ["60", "1 hr"], ["end", "End of song"]]
+const EQ = [["flat", "Flat", [0, 0, 0, 0, 0]], ["bass", "Bass", [5, 4, 1, 0, 0]], ["vocal", "Vocal", [-1, 0, 4, 3, 0]],
+            ["treble", "Treble", [0, 0, 1, 4, 5]], ["loudness", "Loudness", [5, 2, 0, 2, 5]], ["night", "Night", [-1, 0, 2, 1, -1]]]
+
+// ---- State, as in Panel.qml.
+const S = {
+  status: "offline", song: null, opened: false,
+  player: { like: "INDIFFERENT", shuffle: false, repeat: "NONE", volume: 0, maxVolume: 100, boost: false,
+            eq: "flat", sleep: null, muted: false, loggedIn: false, queue: [], queueCount: 0 },
+  playerAt: 0, message: "", tab: "now", pages: [],
+  query: "", filter: "all", searchedKey: "", searchSections: [], searchError: "", searchSeq: 0,
+  home: [], homeError: "", homeLoading: false,
+  library: [], libraryError: "", libraryLoading: false, libraryLoaded: false,
+  account: { loggedIn: false, name: "", handle: "", photo: "" },
+  loginBusy: false, loginError: "", showHeaders: false, headers: "",
+  pendingSeek: -1, pendingVolume: -1, elapsedBase: 0, elapsedAt: 0, elapsedHeld: false,
+  drag: null, // {from, over, y} while a queue row is dragged
+}
+const page = () => S.pages.length ? S.pages[S.pages.length - 1] : null
+const playing = () => S.status === "ok" && S.song && !S.song.isPaused
+const searchActive = () => S.query.trim() !== ""
+const searchKey = () => S.filter + "\n" + S.query.trim()
+const volume = () => S.pendingVolume >= 0 ? S.pendingVolume : S.player.volume
+function elapsed() {
+  if (!S.song) return 0
+  const run = playing() && !S.elapsedHeld ? Math.max(0, (Date.now() - S.elapsedAt) / 1000) : 0
+  return Math.min(S.song.songDuration || 0, S.elapsedBase + run)
+}
+function sleepLeft() {
+  const s = S.player.sleep
+  return s && s.mode === "min" ? Math.max(0, s.left - (playing() ? (Date.now() - S.playerAt) / 1000 : 0)) : 0
+}
+const sleepLabel = () => !S.player.sleep ? "" : (S.player.sleep.mode === "end" ? "End of song" : clock(sleepLeft()))
+function clock(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0))
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0")
+}
+function hueOf(text) {
+  let h = 0
+  for (const c of text || "") h = (h * 31 + c.charCodeAt(0)) % 360
+  return h
+}
+const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c])
+
+// ---- The bridge to i3/ytm-panel, which talks to the service.
+let seq = 0
+const waiting = {}
+function post(cmd, args = []) {
+  const id = ++seq
+  return new Promise(resolve => {
+    waiting[id] = resolve
+    window.webkit.messageHandlers.ytm.postMessage(JSON.stringify({ id, cmd, args }))
+  })
+}
+window.ytmReply = (id, result) => { const done = waiting[id]; delete waiting[id]; if (done) done(result) }
+const call = (cmd, args) => post(cmd, (args || []).map(String))
+const host = (cmd, ...args) => window.webkit.messageHandlers.ytm.postMessage(JSON.stringify({ id: 0, cmd: "_" + cmd, args }))
+
+// ---- Live now-playing.
+async function poll() {
+  const r = await post("_song")
+  const same = S.song && r.song && r.song.videoId === S.song.videoId
+  S.status = r.status
+  S.song = r.song || null
+  if (S.song) syncElapsed(S.song.elapsedSeconds || 0, same)
+  render()
+}
+function syncElapsed(reported, same) {
+  if (S.pendingSeek >= 0) {
+    if (same && Math.abs(reported - S.pendingSeek) > 2.5) return  // stale until mpv reaches the seek
+    S.pendingSeek = -1
+  }
+  const shown = elapsed(), behind = shown - reported
+  S.elapsedHeld = same && playing() && behind > 0.25 && behind < 3  // buffering: hold the knob
+  S.elapsedBase = S.elapsedHeld ? shown : reported
+  S.elapsedAt = Date.now()
+}
+let stateBusy = false
+async function refreshPlayer() {
+  if ((S.status !== "ok" && S.status !== "idle") || stateBusy) return
+  stateBusy = true
+  const r = await call("state")
+  stateBusy = false
+  if (!r.ok) return
+  if (S.pendingVolume >= 0 && Math.abs(r.volume - S.pendingVolume) <= 1) S.pendingVolume = -1
+  const wasSigningIn = S.player.signingIn
+  S.player = r
+  S.playerAt = Date.now()
+  if (wasSigningIn && !r.signingIn) {
+    if (r.loggedIn) reloadAccount()
+    else S.loginError = r.signinError || ""
+  }
+  render()
+}
+let settle = 0, pendingTimer = 0
+async function action(name, args) {
+  if (S.status !== "ok" && S.status !== "idle") return
+  if ((name === "like" || name === "dislike") && !S.player.loggedIn) {
+    S.message = "Log in (Settings) to like songs."
+    return render()
+  }
+  const r = await call(name, args)
+  S.message = r.ok ? "" : (r.error || "That didn't work")
+  render()
+  clearTimeout(settle)
+  settle = setTimeout(() => { poll(); refreshPlayer() }, 350)
+}
+function holdPending() {
+  clearTimeout(pendingTimer)
+  pendingTimer = setTimeout(() => { S.pendingSeek = -1; S.pendingVolume = -1 }, 4000)
+}
+function seek(seconds) {
+  S.pendingSeek = seconds; S.elapsedHeld = false; S.elapsedBase = seconds; S.elapsedAt = Date.now()
+  holdPending()
+  action("seek", [Math.round(seconds)])
+}
+function setVolume(percent) {
+  S.pendingVolume = percent
+  holdPending()
+  action("volume", [Math.round(percent)])
+}
+
+// ---- Tabs, pages and loading.
+function setTab(name) {
+  S.tab = name
+  S.pages = []
+  scrollTop()
+  if (name === "home" && !S.home.length) loadHome()
+  if (name === "library" && !S.libraryLoaded) loadLibrary()
+  if (name === "settings") { loadAccount(); refreshPlayer() }
+  render()
+  if (name === "search") focusSearch()
+}
+function focusSearch() { const f = document.getElementById("q"); if (f) f.focus() }
+function scrollTop() { document.getElementById("scroll").scrollTop = 0 }
+async function openPage(entry) {
+  S.pages = [...S.pages, { type: entry.type, id: entry.id, title: entry.title, subtitle: entry.subtitle,
+                           image: entry.image, sections: [], loading: true, error: "" }]
+  scrollTop()
+  render()
+  const r = await call("open", [entry.type, entry.id])
+  const at = S.pages.findIndex(p => p.type === entry.type && p.id === entry.id)
+  if (at < 0) return
+  S.pages[at] = r.ok ? { ...r, loading: false, error: "" } : { ...S.pages[at], loading: false, error: r.error || "Couldn't open it" }
+  render()
+}
+function back() { S.pages = S.pages.slice(0, -1); scrollTop(); render() }
+function activate(entry, ctx) {
+  if (entry.type === "queue") {
+    if (!entry.current) action("jump", [entry.index])
+  } else if (entry.type === "song" || entry.type === "video") {
+    if (ctx && ctx.type !== "artist" && entry.index !== undefined) action("playall", [ctx.type, ctx.id, entry.index])
+    else action("play", [entry.id])
+  } else {
+    openPage(entry)
+  }
+}
+async function runSearch() {
+  if (!searchActive() || S.searchedKey === searchKey()) return
+  const key = searchKey(), mine = ++S.searchSeq
+  render()
+  const r = await call("search", [S.query.trim(), S.filter])
+  if (mine !== S.searchSeq) return  // a newer search is running
+  S.searchedKey = key
+  S.searchSections = r.ok ? r.sections : []
+  S.searchError = r.ok ? "" : (r.error || "Search failed")
+  render()
+}
+function clearSearch() {
+  Object.assign(S, { query: "", searchedKey: "", searchSections: [], searchError: "" })
+  S.searchSeq++
+  render()
+}
+async function loadHome() {
+  S.homeLoading = true
+  const r = await call("home")
+  S.homeLoading = false
+  S.home = r.ok ? r.sections : []
+  S.homeError = r.ok ? "" : (r.error || "Couldn't load your home page")
+  render()
+}
+async function loadLibrary() {
+  if (!S.player.loggedIn) return
+  S.libraryLoading = true
+  const r = await call("library")
+  S.libraryLoading = false
+  S.libraryLoaded = r.ok
+  S.library = r.ok ? r.sections : []
+  S.libraryError = r.ok ? "" : (r.error || "Couldn't load your library")
+  render()
+}
+async function loadAccount() {
+  const r = await call("account")
+  if (!r.ok) return
+  S.account = r
+  if (r.expired) S.loginError = "YouTube ended this login — sign in again"
+  render()
+}
+function reloadAccount() {
+  loadAccount(); refreshPlayer()
+  S.home = []; S.library = []; S.libraryLoaded = false
+}
+async function login() {
+  if (S.loginBusy) return
+  S.loginBusy = true; S.loginError = ""
+  render()
+  const r = await call("login", [S.headers])
+  S.loginBusy = false
+  if (r.ok) { S.headers = ""; reloadAccount() } else S.loginError = r.error || "Couldn't log in"
+  render()
+}
+async function signin() {
+  S.loginError = ""
+  const r = await call("signin")
+  if (!r.ok) S.loginError = r.error || "Couldn't open the sign-in window"
+  else refreshPlayer()
+  render()
+}
+
+// ---- Building blocks.
+function art(src, seed, size, radius) {
+  const h = hueOf(seed)
+  return `<div class="art" style="width:${size}px;height:${size}px;border-radius:${radius};` +
+    `background:linear-gradient(hsl(${h},35%,42%),hsl(${h},30%,14%))">` +
+    (src ? `<img src="${esc(src)}" onerror="this.remove()">` : "") + `</div>`
+}
+function track(id, cls = "") {
+  return `<div class="track ${cls}" id="${id}"><div class="rail"></div><div class="fill"></div><div class="boost"></div>` +
+    `<div class="unity"></div>${cls.includes("grad") ? '<div class="knob"></div>' : ""}</div>`
+}
+let entries = []  // what each rendered row stands for: [entry, context]
+function row(e, ctx, large) {
+  const playable = e.type === "song" || e.type === "video"
+  const timed = playable || e.type === "queue"
+  const current = e.type === "queue" ? !!e.current : playable && S.song && S.song.videoId === e.id
+  const editable = e.type === "queue" && !current
+  const k = entries.push([e, ctx]) - 1
+  const cls = ["row", large && "large", current && "playing", e.type === "queue" && current && "cur",
+               editable && "editable", playable && "playable"].filter(Boolean).join(" ")
+  return `<div class="${cls}" data-row="${k}"${e.type === "queue" ? ` data-qi="${e.index}"` : ""}>` +
+    art(e.image, e.title, large ? 56 : 40, e.type === "artist" ? "50%" : (large ? "10px" : "8px")) +
+    `<div class="txt"><div class="t ell">${esc(e.title)}</div>${e.subtitle ? `<div class="s ell">${esc(e.subtitle)}</div>` : ""}</div>` +
+    `<div class="trail">` +
+      (timed ? `<span class="len mono">${esc(e.length || "")}</span>` : icon("chevron", 14, 2.2)) +
+      (playable ? `<button class="ib sm next" data-add="${esc(e.id)}">${icon("playNext", 15)}</button>` : "") +
+      (editable ? `<span class="qa"><button class="ib sm" data-qact="playnext" data-qi="${e.index}">${icon("up", 13)}</button>` +
+                  `<button class="ib sm rm" data-qact="remove" data-qi="${e.index}">${icon("close", 13)}</button></span>` : "") +
+    `</div></div>`
+}
+function sections(list, ctx) {
+  return `<div class="sections">` + (list || []).map(sec =>
+    `<div class="section"><div class="sh">${esc(sec.title)}</div>` +
+    sec.items.map(e => row(e, ctx, sec.title === "Top result")).join("") + `</div>`).join("") + `</div>`
+}
+const note = text => `<div class="note">${esc(text)}</div>`
+
+// ---- Views.
+function viewNow() {
+  if (S.status === "idle") return note("Nothing playing — find something in Search or Home.")
+  if (S.status !== "ok" || !S.song) return ""
+  const s = S.song, p = S.player
+  const queue = p.queue.map(q => ({ type: "queue", id: String(q.index), index: q.index, title: q.title,
+                                    subtitle: q.artist, length: q.length, image: q.image || "", current: q.current }))
+  return `<div class="np">${art(s.imageSrc, s.title, 76, "14px")}
+      <div class="meta"><div class="title ell">${esc(s.title)}</div><div class="artist ell">${esc(s.artist)}</div>
+        ${s.album ? `<div class="album ell">${esc(s.album)}</div>` : ""}</div>
+      <div class="rating">
+        <button class="ib${p.like === "DISLIKE" ? " on" : ""}" data-act="dislike">${icon("dislike")}</button>
+        <button class="ib${p.like === "LIKE" ? " on" : ""}" data-act="like">${icon("like")}</button>
+      </div></div>
+    <div class="progress">${track("progress", "grad")}
+      <div class="times"><span class="mono" id="elapsed"></span>
+        ${p.sleep ? `<button class="sleep" data-act="sleep" data-args='["off"]'>${icon("moon", 10, 2.4)}<span class="mono" id="sleep-left"></span><span class="mono x">✕</span></button>` : ""}
+        <span class="mono" id="remaining"></span></div></div>
+    <div class="controls">
+      <button class="ib side${p.shuffle ? " on" : ""}" data-act="shuffle">${icon("shuffle", 17)}</button>
+      <button class="ib skip" data-act="previous">${icon("previousFill", 20)}</button>
+      <button class="play" data-act="toggle">${icon(playing() ? "pauseFill" : "playFill", 22)}</button>
+      <button class="ib skip" data-act="next">${icon("nextFill", 20)}</button>
+      <button class="ib side${p.repeat !== "NONE" ? " on" : ""}" data-act="repeat">${icon(p.repeat === "ONE" ? "repeatOne" : "repeat", 17)}</button>
+    </div>
+    <div class="volume${p.muted ? " muted" : ""}">
+      <button class="ib${p.muted ? " on" : ""}" data-act="mute">${icon(p.muted ? "muted" : "volume", 15)}</button>
+      ${track("volume")}<span class="mono" id="volume-text"></span></div>
+    <div class="queue"><div class="head"><span class="sh">Up next</span>
+        <span class="mono">${p.queueCount} ${p.queueCount === 1 ? "track" : "tracks"}</span></div>
+      ${queue.length ? `<div class="queue-list" id="queue-list">${queue.map(e => row(e, null)).join("")}</div>` : note("Queue is empty")}
+    </div>`
+}
+function viewPage(pg) {
+  return `<div class="page">${art(pg.image, pg.title, 88, pg.type === "artist" ? "44px" : "14px")}
+      <div class="meta"><div class="title">${esc(pg.title)}</div><div class="sub ell">${esc(pg.subtitle || "")}</div>
+        <div class="btns"><button class="pill" data-back>${icon("back", 14)}Back</button>
+          ${!pg.loading && !pg.error ? `<button class="pill primary" data-playall>${icon("playFill", 14)}Play</button>` : ""}</div></div></div>
+    ${pg.loading || pg.error ? note(pg.loading ? "Loading…" : pg.error) : ""}
+    ${sections(pg.sections, pg)}`
+}
+function viewSearch() {
+  const searching = searchActive() && S.searchedKey !== searchKey()
+  return `<div class="search">${icon("search", 14, 2.2)}<input id="q" placeholder="Search YouTube Music" spellcheck="false"></div>
+    <div class="chips">${FILTERS.map(([v, l]) => `<button class="chip${S.filter === v ? " on" : ""}" data-filter="${v}">${l}</button>`).join("")}</div>
+    ${searchActive() && (searching || S.searchError || !S.searchSections.length)
+      ? note(searching ? "Searching…" : (S.searchError || `No results for “${S.query.trim()}”`)) : ""}
+    ${searchActive() ? sections(S.searchSections) : '<div style="height:20px"></div>'}`
+}
+function viewLibrary() {
+  if (!S.player.loggedIn)
+    return note("Log in to see your playlists, albums and artists.") +
+      `<div style="text-align:center;padding-bottom:24px"><button class="pill primary" data-tab="settings">${icon("account", 14)}Log in</button></div>`
+  return (S.libraryLoading || S.libraryError ? note(S.libraryLoading ? "Loading…" : S.libraryError) : "") + sections(S.library)
+}
+function viewHome() {
+  return (S.homeLoading || S.homeError ? note(S.homeLoading ? "Loading…" : S.homeError) : "") + sections(S.home)
+}
+function viewSettings() {
+  const p = S.player, a = S.account, sleep = p.sleep
+  const sleepOn = v => !sleep ? v === "off" : (sleep.mode === "end" ? v === "end" : String(sleep.minutes) === v)
+  let html = `<div class="settings">
+    <div class="hrow"><span class="sh">Sleep timer</span><span class="mono" id="sleep-status"></span></div>
+    <div class="opts">${SLEEP.map(([v, l]) => `<button class="opt${sleepOn(v) ? " on" : ""}" data-act="sleep" data-args='["${v}"]'>${l}</button>`).join("")}</div>
+    <div class="gap"></div><span class="sh">Equalizer</span>
+    <div class="eq">${EQ.map(([v, l, gains]) => `<button class="${p.eq === v ? "on" : ""}" data-act="eq" data-args='["${v}"]'>
+      <div class="bars">${gains.map(g => `<i style="height:${30 + g * 10}%"></i>`).join("")}</div><div class="lbl">${l}</div></button>`).join("")}</div>
+    <div class="gap"></div><span class="sh">Volume</span>
+    <button class="card" data-act="boost"><div class="txt"><div class="t">Volume boost</div>
+      <div class="s">Allow up to 150%. May distort loud tracks.</div></div><div class="switch${p.boost ? " on" : ""}"></div></button>
+    <div class="gap"></div><span class="sh">Interface</span>
+    <button class="card" data-tui><div class="badge">&gt;_</div><div class="txt"><div class="t">Open in TUI</div>
+      <div class="s">Keyboard-driven terminal view</div></div><span style="color:rgba(255,255,255,.4)">${icon("chevron", 14)}</span></button>
+    <div class="gap"></div><span class="sh">Account</span>`
+  if (a.loggedIn) {
+    html += `<div class="account">${art(a.photo, a.name, 44, "22px")}<div class="txt"><div class="ell" style="font-weight:500">${esc(a.name || "Logged in")}</div>
+      ${a.handle ? `<div class="s ell small" style="color:rgba(255,255,255,.45)">${esc(a.handle)}</div>` : ""}</div>
+      <button class="pill" data-logout>${icon("logout", 14)}Log out</button></div>`
+  } else {
+    html += `<div class="small">${p.signingIn ? "Finish signing in in the window that opened. It closes by itself once you're in."
+        : "Log in to like songs and see your library and personal home. Search and playback work without it."}</div>
+      <div style="display:flex;gap:8px"><button class="pill primary" data-signin>${icon("account", 14)}${p.signingIn ? "Waiting for Google…" : "Sign in with Google"}</button>
+        <button class="pill" data-headers>${S.showHeaders ? "Hide headers" : "Paste headers"}</button></div>`
+    if (S.showHeaders)
+      html += `<div class="small">1. Open music.youtube.com in your browser, signed in.<br>
+        2. Open the developer tools (F12) → Network, and reload the page.<br>
+        3. Find a POST request to “browse”, right-click → Copy → Copy request headers.<br>
+        4. Paste them below and press Log in.</div>
+        <textarea id="headers" placeholder="Paste request headers here" spellcheck="false"></textarea>
+        <div><button class="pill primary" data-login>${icon("account", 14)}${S.loginBusy ? "Checking…" : "Log in"}</button></div>`
+    // The popup closes while the sign-in window has focus, so it can miss the
+    // end of signing in: show the service's last sign-in error too.
+    const error = S.loginError || (!p.signingIn && p.signinError) || ""
+    if (error) html += `<div class="err">${esc(error)}</div>`
+    html += `<div class="fine">Your login cookie is saved only on this computer, in ~/.config/ytm-bar, readable by you alone. Signing out of Google in the sign-in window ends it.</div>`
+  }
+  return html + `</div>`
+}
+
+// ---- Rendering: rebuild the HTML only when it changed, so hover, focus and
+// scroll survive the once-a-second poll; tick() moves the live bits.
+let lastHtml = ""
+function render() {
+  if (S.drag) return  // keep the rows still while one is dragged
+  document.getElementById("segments").innerHTML = TABS.map(([v, l]) =>
+    `<button class="${S.tab === v && !S.pages.length ? "on" : ""}" data-tab="${v}">${l}</button>`).join("")
+  const sb = document.getElementById("settings-btn")
+  sb.className = "ib" + (S.tab === "settings" ? " on" : "")
+  sb.innerHTML = icon("settings")
+  entries = []
+  const pg = page()
+  let html = ""
+  if (S.status === "offline") html += `<div class="msg" style="color:rgba(255,255,255,.45)">The player isn't running. Click the bar widget to start it, or run: systemctl --user start ytm-bar</div>`
+  if (S.message) html += `<div class="msg">${esc(S.message)}</div>`
+  html += pg ? viewPage(pg) : { now: viewNow, search: viewSearch, library: viewLibrary, home: viewHome, settings: viewSettings }[S.tab]()
+  if (html !== lastHtml) {
+    const focused = document.activeElement && document.activeElement.id
+    const ql = document.getElementById("queue-list"), queueScroll = ql ? ql.scrollTop : 0
+    document.getElementById("content").innerHTML = html
+    lastHtml = html
+    const q = document.getElementById("q")
+    if (q) q.value = S.query
+    const h = document.getElementById("headers")
+    if (h) h.value = S.headers
+    const nql = document.getElementById("queue-list")
+    if (nql) nql.scrollTop = queueScroll
+    if (focused && document.getElementById(focused)) document.getElementById(focused).focus()
+  }
+  tick()
+}
+function setTrack(id, value, max, unity = 0) {
+  const el = document.getElementById(id)
+  if (!el) return
+  const f = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0
+  const part = c => el.querySelector(c).style
+  part(".fill").width = f * 100 + "%"
+  part(".boost").display = unity > 0 && f > unity ? "" : "none"
+  part(".boost").left = unity * 100 + "%"
+  part(".boost").width = (f - unity) * 100 + "%"
+  part(".unity").display = unity > 0 ? "" : "none"
+  part(".unity").left = unity * 100 + "%"
+  if (el.querySelector(".knob")) part(".knob").left = f * 100 + "%"
+}
+const text = (id, t) => { const el = document.getElementById(id); if (el && el.textContent !== t) el.textContent = t }
+function tick() {
+  const p = S.player
+  if (S.song) {
+    const dur = Math.max(1, S.song.songDuration || 0)
+    const shown = dragging && dragging.id === "progress" ? dragging.value : elapsed()
+    setTrack("progress", shown, dur)
+    text("elapsed", clock(shown))
+    text("remaining", "-" + clock((S.song.songDuration || 0) - shown))
+  }
+  const max = p.maxVolume || 100
+  const vol = dragging && dragging.id === "volume" ? dragging.value : volume()
+  setTrack("volume", vol, max, p.boost ? 100 / (p.maxVolume || 150) : 0)
+  text("volume-text", p.muted ? "Muted" : Math.round(vol) + "%")
+  const vt = document.getElementById("volume-text")
+  if (vt) vt.style.color = vol > 100 && !p.muted ? "var(--accent)" : ""
+  text("sleep-left", sleepLabel())
+  text("sleep-status", !p.sleep ? "" : (p.sleep.mode === "end" ? "Stops after this song" : "Pauses in " + sleepLabel()))
+}
+
+// ---- Input.
+document.addEventListener("click", ev => {
+  const t = ev.target.closest("button, .row")
+  if (!t || dragMoved) return
+  const d = t.dataset
+  if (d.tab) return setTab(d.tab)
+  if (d.act) return action(d.act, d.args ? JSON.parse(d.args) : [])
+  if (d.filter) { S.filter = d.filter; clearTimeout(debounce); return runSearch() }
+  if (d.add) return action("add", [d.add])
+  if (d.qact) return action(d.qact, [d.qi])
+  if ("back" in d) return back()
+  if ("playall" in d) { const pg = page(); return action("playall", [pg.type, pg.id]) }
+  if ("tui" in d) return host("tui")
+  if ("signin" in d) return S.player.signingIn || signin()
+  if ("headers" in d) { S.showHeaders = !S.showHeaders; return render() }
+  if ("login" in d) return login()
+  if ("logout" in d) return call("logout").then(() => { reloadAccount(); render() })
+  if (d.row) { const [e, ctx] = entries[+d.row]; activate(e, ctx) }
+})
+let debounce = 0
+document.addEventListener("input", ev => {
+  if (ev.target.id === "headers") S.headers = ev.target.value
+  if (ev.target.id !== "q") return
+  S.query = ev.target.value
+  clearTimeout(debounce)
+  if (!searchActive()) clearSearch()
+  else { render(); debounce = setTimeout(runSearch, 350) }
+})
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Enter" && ev.target.id === "q") { clearTimeout(debounce); runSearch() }
+  if (ev.key !== "Escape") return
+  ev.preventDefault()
+  if (ev.target.id === "q" && S.query) { ev.target.value = ""; clearSearch() }
+  else if (S.pages.length) back()
+  else host("close")
+})
+
+// Tracks: click or drag; seek / set the volume on release.
+let dragging = null
+// Queue rows: drag to reorder; the amber line shows where it lands.
+let dragMoved = false
+document.addEventListener("mousedown", ev => {
+  dragMoved = false
+  const tr = ev.target.closest(".track")
+  if (tr) {
+    const r = tr.getBoundingClientRect()
+    const max = tr.id === "progress" ? Math.max(1, S.song ? S.song.songDuration : 1) : (S.player.maxVolume || 100)
+    dragging = { id: tr.id, rect: r, max, value: Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * max }
+    tick()
+    return
+  }
+  const rowEl = ev.target.closest(".row.editable")
+  if (rowEl && !ev.target.closest("button")) S.drag = { from: +rowEl.dataset.qi, over: -1, y: ev.clientY, h: rowEl.offsetHeight + 1, el: rowEl }
+})
+document.addEventListener("mousemove", ev => {
+  if (dragging) {
+    dragging.value = Math.max(0, Math.min(1, (ev.clientX - dragging.rect.left) / dragging.rect.width)) * dragging.max
+    return tick()
+  }
+  if (!S.drag) return
+  const dy = ev.clientY - S.drag.y
+  if (!dragMoved && Math.abs(dy) < 6) return
+  dragMoved = true
+  document.body.classList.add("dragging")
+  const q = S.player.queue
+  const first = q.length ? q[0].index + 1 : 0, last = q.length ? q[q.length - 1].index : 0
+  S.drag.over = Math.max(first, Math.min(last, S.drag.from + Math.round(dy / S.drag.h)))
+  for (const el of document.querySelectorAll(".row[data-qi]")) {
+    el.classList.toggle("from", +el.dataset.qi === S.drag.from)
+    el.classList.toggle("over", +el.dataset.qi === S.drag.over && S.drag.over !== S.drag.from)
+  }
+})
+document.addEventListener("mouseup", () => {
+  if (dragging) {
+    const d = dragging
+    dragging = null
+    if (d.id === "progress") seek(d.value); else setVolume(d.value)
+    return
+  }
+  if (!S.drag) return
+  const { from, over } = S.drag
+  S.drag = null
+  document.body.classList.remove("dragging")
+  if (dragMoved) {
+    if (over >= 0 && over !== from) action("move", [from, over])
+    else { lastHtml = ""; render() }
+  }
+})
+
+// ---- Shown and hidden by i3/ytm-panel.
+window.ytmShown = tab => {
+  S.opened = true
+  if (tab) setTab(tab)
+  else if (S.tab === "now" && !S.song && !S.pages.length) setTab("search")
+  else if (S.tab === "settings") loadAccount()  // signing in may have finished while hidden
+  if (S.searchError) { S.searchedKey = ""; runSearch() }  // it may work now (the popup stays running)
+  poll(); refreshPlayer()
+  if (S.tab === "search") focusSearch()
+}
+window.ytmHidden = () => { S.opened = false; S.message = ""; render() }
+
+// The window follows the card's height.
+new ResizeObserver(() => host("size", Math.ceil(document.getElementById("card").getBoundingClientRect().height)))
+  .observe(document.getElementById("card"))
+
+setInterval(() => { if (S.opened || playing()) poll() }, 1000)
+setInterval(() => { if (S.opened) refreshPlayer() }, 3000)
+setInterval(() => { if (S.opened && playing()) tick() }, 250)
+render()
+poll()
+</script>
+</body>
+</html>
