@@ -84,6 +84,16 @@ SIGNIN_URL = ("https://accounts.google.com/ServiceLogin?service=youtube&continue
               "https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3D"
               "https%253A%252F%252Fmusic.youtube.com%252F")
 SIGNIN_BROWSERS = ("chromium", "google-chrome-stable", "brave")
+# The window opens on this page, which forwards to Google straight away. It
+# names the window (Chromium on Wayland takes an app window's class from its
+# first page), so Hyprland can float it small and centred (omarchy/bindings.lua).
+SIGNIN_START = "data:text/html;charset=utf-8," + urllib.parse.quote(
+    '<title>ytm-bar sign-in</title>'
+    f'<meta http-equiv="refresh" content="0;url={SIGNIN_URL}">'
+    '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0e1013;'
+    'color:#d8d8d2;font:15px system-ui,sans-serif">Opening Google sign-in…</body>')
+# Once the window's title is this, you're signed in and on YouTube Music.
+SIGNIN_DONE_TITLE = "YouTube Music"
 STATE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "ytm-bar/state.json"
 # The queue and position, so a restart (or reboot) resumes where you left off.
 SESSION_FILE = STATE_FILE.parent / "session.json"
@@ -406,6 +416,15 @@ def mood_items(shelf_items):
     return out
 
 
+def window_title(pid):
+    """The title of the Hyprland window that process `pid` owns, or ""."""
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3).stdout
+        return next((c.get("title", "") for c in json.loads(out) if c.get("pid") == pid), "")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ""
+
+
 def video_id_of(url):
     match = re.search(r"[?&]v=([\w-]{11})", url or "")
     return match.group(1) if match else None
@@ -536,6 +555,7 @@ class Player:
         self._mood_titles = {}  # mood params -> title, for its page
         self.recent_searches = []
         self.signin_error = ""
+        self.signin_stage = ""  # "signing" (at Google), "finishing" (reading the login)
         try:
             saved = json.loads(STATE_FILE.read_text())
             self.volume = int(saved.get("volume", self.volume))
@@ -767,6 +787,7 @@ class Player:
             "loggedIn": self.logged_in,
             "signingIn": self.signing_in,
             "signinError": self.signin_error,
+            "signinStage": self.signin_stage if self.signing_in else "",
             **self.queue(args),
         }
 
@@ -1074,9 +1095,9 @@ class Player:
         return self._signin is not None
 
     def signin(self, args):
-        """Open a browser window to sign in to Google. Once YouTube Music's
-        cookies show up in its profile, they become the login and the window
-        closes."""
+        """Open a small browser window to sign in to Google. As soon as it
+        reaches YouTube Music, it's closed (Chromium saves its cookies on the
+        way out) and they become the login."""
         with self.lock:
             if self.signing_in:
                 return {"signingIn": True}
@@ -1085,36 +1106,56 @@ class Player:
                 raise ApiError("failed", "Signing in needs Chromium — run: omarchy pkg add chromium")
             SIGNIN_PROFILE.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.signin_error = ""
+            self.signin_stage = "signing"
             self._signin = subprocess.Popen([
                 browser, f"--user-data-dir={SIGNIN_PROFILE}", "--password-store=basic",
-                "--no-first-run", "--no-default-browser-check", f"--app={SIGNIN_URL}",
-                "--class=ytm-bar-signin",
+                "--no-first-run", "--no-default-browser-check", "--window-size=480,680",
+                f"--app={SIGNIN_START}",
             ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
             threading.Thread(target=self.watch_signin, args=(self._signin,), daemon=True).start()
         return {"signingIn": True}
 
     def watch_signin(self, proc):
-        error, tried = "The window closed before you signed in", None
+        """Wait for the sign-in. The window's title says when it has reached
+        YouTube Music (Hyprland); then closing it makes Chromium write its
+        cookies at once, instead of on its own every ~30 s. Without Hyprland,
+        the profile is just checked until the cookies turn up."""
+        error, tried, started = "The window closed before you signed in", None, time.monotonic()
         while True:
             closed = proc.poll() is not None
-            try:
-                headers = profile_headers(SIGNIN_PROFILE)
-                if headers and headers != tried:
-                    tried = headers
-                    self.save_login(headers)
-                    error = ""
-                    break
-            except ApiError as e:
-                error = str(e)
-            except Exception as e:
-                error = f"Couldn't read the sign-in window: {e}"
+            if not closed and window_title(proc.pid) == SIGNIN_DONE_TITLE:
+                self.signin_stage = "finishing"
+                time.sleep(1)  # let YouTube Music finish setting its cookies
+                proc.terminate()
+                try:
+                    proc.wait(10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                closed = True
+            # Read the profile now and then while you sign in, and once it's closed.
+            if closed or time.monotonic() - started > 20:
+                try:
+                    headers = profile_headers(SIGNIN_PROFILE)
+                    if headers and headers != tried:
+                        tried = headers
+                        self.signin_stage = "finishing"
+                        self.save_login(headers)
+                        error = ""
+                        break
+                    if closed and not headers:
+                        error = "YouTube Music didn't sign in — try again"
+                except ApiError as e:
+                    error = str(e)
+                except Exception as e:
+                    error = f"Couldn't read the sign-in window: {e}"
             if closed:
                 break
-            time.sleep(2)
+            time.sleep(1)
         if proc.poll() is None:
             proc.terminate()  # signed in: close the window
         self.signin_error = error
+        self.signin_stage = ""
         self._signin = None
 
     def login_from_profile(self):

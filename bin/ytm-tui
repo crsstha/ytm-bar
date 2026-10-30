@@ -918,14 +918,17 @@ class App:
             c.put(y + 1, x, ICON["account"] + "  " + clip(self.account.get("name") or "Logged in", width - 16), INK)
             button = " Log out "
         else:
-            if self.player.get("signingIn"):
-                note = "Finish signing in in the browser window — it closes by itself."
+            if self.player.get("signinStage") == "finishing":
+                note = "Finishing sign-in… the window closes in a moment."
+            elif self.player.get("signingIn"):
+                note = "Sign in to Google in the small window — it closes by itself."
             elif self.account.get("expired"):
                 note = "YouTube ended this login — sign in again."
             else:
                 note = "Not logged in — likes, Saved and a personal For you need it. h: paste headers instead"
             c.put(y + 1, x, clip(note, width), white(0.45))
-            button = " Waiting for Google… " if self.player.get("signingIn") else " Sign in with Google "
+            button = (" Finishing sign-in… " if self.player.get("signinStage") == "finishing"
+                      else " Waiting for Google… " if self.player.get("signingIn") else " Sign in with Google ")
         bx = x + width - len(button)
         c.put(y + 2 if not self.account.get("loggedIn") else y + 1, bx, button,
               BLACK if focus else INK, bg=WHITE if focus else white(0.1), bold=focus)
