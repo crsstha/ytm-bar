@@ -34,6 +34,8 @@ browsing and radio, mpv + yt-dlp for the audio.
                           Make a private playlist, optionally with a first song.
   ytm-bar addto PLAYLIST_ID VIDEO_ID
                           Add a song to one of your playlists.
+  ytm-bar save | unsave PLAYLIST_ID
+                          Save someone else's playlist to your library, or remove it.
   ytm-bar open TYPE ID    An album, artist or playlist, as sections.
   ytm-bar play VIDEO_ID   Play a song now, followed by its radio.
   ytm-bar add VIDEO_ID    Queue a song to play next.
@@ -121,6 +123,8 @@ USAGE = {
     "move": "Usage: ytm-bar move FROM TO",
     "newplaylist": "Usage: ytm-bar newplaylist TITLE [VIDEO_ID]",
     "addto": "Usage: ytm-bar addto PLAYLIST_ID VIDEO_ID",
+    "save": "Usage: ytm-bar save PLAYLIST_ID",
+    "unsave": "Usage: ytm-bar unsave PLAYLIST_ID",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
             "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout", "stats",
@@ -486,6 +490,7 @@ class Player:
         self._signin = None  # the sign-in window's process, while it's watched
         self._session = ""  # what session.json holds
         self._colors = {}  # cover URL -> cover_color(), "" while it's worked out
+        self._saved = (0.0, set())  # (time, ids of the playlists in your library)
         self.signin_error = ""
         try:
             saved = json.loads(STATE_FILE.read_text())
@@ -753,7 +758,32 @@ class Player:
         sections[0]["items"] = [liked] + [row for row in playlists if row["id"] != "LM"]
         return {"sections": sections}
 
-    # -- Your own playlists.
+    # -- Your own playlists, and ones you've saved.
+
+    def saved_ids(self, max_age=120):
+        """Ids of the playlists in your library, cached for `max_age` seconds."""
+        at, ids = self._saved
+        if time.time() - at > max_age:
+            rows = entries_of(self.call("get_library_playlists", limit=200))
+            ids = {row["id"] for row in rows}
+            self._saved = (time.time(), ids)
+        return ids
+
+    def save_(self, args):  # "save" is taken: save() writes state.json
+        return self.set_saved(args[0], True)
+
+    def unsave(self, args):
+        return self.set_saved(args[0], False)
+
+    def set_saved(self, playlist_id, saved):
+        if not self.logged_in:
+            raise ApiError("unauthorized", "Log in (Settings) to save playlists")
+        if playlist_id in ("LM", "SE"):
+            raise ApiError("failed", "That one is always in your library")
+        self.call("rate_playlist", playlist_id, "LIKE" if saved else "INDIFFERENT")
+        at, ids = self._saved
+        self._saved = (at, (ids | {playlist_id}) if saved else (ids - {playlist_id}))
+        return {"saved": saved}
 
     def playlists(self, args):
         """Playlists songs can be added to: yours, without Liked Music and
@@ -803,8 +833,16 @@ class Player:
             author = playlist.get("author")
             count = playlist.get("trackCount")
             liked = item_id == "LM"
+            owned = bool(playlist.get("owned")) or liked or item_id == "SE"
+            saved = False
+            if self.logged_in and not owned:
+                try:
+                    saved = item_id in self.saved_ids()
+                except ApiError:
+                    pass
             return {"type": kind, "id": item_id, "title": playlist.get("title") or "",
                     "image": "" if liked else image_of(playlist), "liked": liked,
+                    "owned": owned, "saved": saved,
                     "subtitle": joined("Playlist", (author or {}).get("name") if isinstance(author, dict) else author,
                                        f"{count} songs" if count else ""),
                     "sections": [{"title": "Songs", "items": entries_of(playlist.get("tracks"), numbered=True)}]}
@@ -1218,7 +1256,8 @@ class Player:
             raise ApiError("failed", f"Unknown command {command!r}")
         if command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
             raise ApiError("failed", USAGE[command])
-        if (command == "newplaylist" and not (args and str(args[0]).strip())) or (command == "addto" and len(args) < 2):
+        if (command == "newplaylist" and not (args and str(args[0]).strip())) or (command == "addto" and len(args) < 2) \
+                or (command in ("save", "unsave") and not (args and args[0])):
             raise ApiError("failed", USAGE[command])
         return handler(args)
 
@@ -1395,12 +1434,14 @@ def run(command, args):
         raise ApiError("failed", USAGE["newplaylist"])
     elif command == "addto" and len(args) < 2:
         raise ApiError("failed", USAGE["addto"])
+    elif command in ("save", "unsave") and not (args and args[0]):
+        raise ApiError("failed", USAGE[command])
     elif command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
         raise ApiError("failed", USAGE[command])
     elif command == "login":
         args = [read_headers()]
     slow = command in ("search", "home", "library", "open", "playall", "login", "account",
-                       "playlists", "newplaylist", "addto")
+                       "playlists", "newplaylist", "addto", "save", "unsave")
     if command == "signin":
         result = request("POST", "/signin", {"args": []}, timeout=10)
         if not result.get("ok"):
