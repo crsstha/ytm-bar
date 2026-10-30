@@ -12,6 +12,7 @@ browsing and radio, mpv + yt-dlp for the audio.
   ytm-bar login           The same, by pasting request headers from your browser.
   ytm-bar logout          Forget the account.
   ytm-bar account         Whether you're logged in, and as whom.
+  ytm-bar stats           Memory used by the service and mpv, in MB.
   ytm-bar song            The current song, as JSON.
   ytm-bar state           Like / shuffle / repeat / volume and the queue, as JSON.
   ytm-bar queue           The queue only, as JSON.
@@ -115,7 +116,7 @@ USAGE = {
     "move": "Usage: ytm-bar move FROM TO",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
-            "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout",
+            "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout", "stats",
             "mute", "boost", *USAGE}
 
 # Equalizer presets: gains in dB for five bands, as in the design.
@@ -340,6 +341,17 @@ def cover_color(url):
     h, _, s = best
     r, g, b = colorsys.hls_to_rgb(h, 0.74, max(0.35, min(0.8, s)) if s > 0.08 else 0.0)
     return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+
+def rss_mb(pid):
+    """Resident memory of a process in MB, or 0 if it's gone."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
 
 
 def video_id_of(url):
@@ -1045,6 +1057,12 @@ class Player:
         if sleep["left"] <= 0:
             self.sleep = None
             mpv.set("pause", True)
+
+    def stats(self, args):
+        """Memory in use: this service, and mpv (the player and its buffers)."""
+        mpv = self.player(start=False)
+        service, player = rss_mb(os.getpid()), rss_mb(mpv.proc.pid) if mpv else 0
+        return {"service": service, "mpv": player, "total": round(service + player, 1)}
 
     # -- Resuming where you left off.
 
