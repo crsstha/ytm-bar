@@ -178,10 +178,10 @@ Panel {
   }
 
   readonly property var tabs: [
-    { value: "now", label: "Now" },
-    { value: "search", label: "Search" },
-    { value: "library", label: "Library" },
-    { value: "home", label: "Home" }
+    { value: "now", label: "Playing" },
+    { value: "search", label: "Find" },
+    { value: "library", label: "Saved" },
+    { value: "home", label: "For you" }
   ]
   readonly property var filters: [
     { value: "all", label: "All" },
@@ -1391,7 +1391,7 @@ Panel {
           // ---- Now: the player and the queue.
           Note {
             visible: root.page === null && root.tab === "now" && root.status === "idle"
-            text: "Nothing playing — find something in Search or Home."
+            text: "Nothing playing — find something in Find or For you."
           }
           Column {
             visible: root.page === null && root.tab === "now" && root.status === "ok" && root.song !== null
@@ -2225,7 +2225,7 @@ Panel {
               color: root.white(0.7)
               text: root.signingIn
                 ? "Finish signing in in the window that opened. It closes by itself once you're in."
-                : "Log in to like songs and see your library and personal home. Search and playback work without it."
+                : "Log in to like songs and see Saved and a personal For you. Finding and playing music work without it."
             }
             Row {
               visible: !root.account.loggedIn

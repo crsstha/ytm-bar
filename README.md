@@ -39,9 +39,9 @@ closes by itself. No Chromium? Use **Paste headers** instead.
 | Middle-click | play / pause |
 | Scroll | previous / next |
 
-- **Now** — controls, volume and the up-next queue (drag to reorder, hover to
+- **Playing** — controls, volume and the up-next queue (drag to reorder, hover to
   play next or remove). The radio for the current song keeps the queue going.
-- **Search · Library · Home** — click a song to play it; albums, artists and
+- **Find · Saved · For you** — click a song to play it; albums, artists and
   playlists open as a page.
 - **⚙ Settings** — sleep timer, equalizer, volume boost, **Open in TUI**, account.
 

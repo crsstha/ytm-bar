@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """ytm-tui — the Mini Player in a terminal. Same tabs and controls as the bar
-popup (Now, Search, Library, Home, Settings), driven by the ytm-bar service.
+popup (Playing, Find, Saved, For you, Settings), driven by the ytm-bar service.
 
 Keys (also shown at the bottom):
-  1-4 / Tab      Now, Search, Library, Home        ,  Settings
+  1-4 / Tab      Playing, Find, Saved, For you     ,  Settings
   space          play / pause      n / p   next / previous
   ← / →          seek 5 s          + / -   volume
   m  mute        s  shuffle        r  repeat       l / d  like / dislike
@@ -69,7 +69,7 @@ ICON = {
 }
 CAP_LEFT, CAP_RIGHT = "", ""  # rounded ends, for pills
 
-TABS = [("now", "Now"), ("search", "Search"), ("library", "Library"), ("home", "Home")]
+TABS = [("now", "Playing"), ("search", "Find"), ("library", "Saved"), ("home", "For you")]
 FILTERS = [("all", "All"), ("songs", "Songs"), ("albums", "Albums"), ("artists", "Artists"),
            ("playlists", "Playlists"), ("videos", "Videos")]
 SLEEP = [("off", "Off"), ("15", "15 min"), ("30", "30 min"), ("60", "1 hr"), ("end", "End of song")]
@@ -495,7 +495,7 @@ class App:
         else:
             data = self.home if self.tab == "home" else self.library
             if self.tab == "library" and not self.player.get("loggedIn"):
-                c.put(y + 1, left, "Log in (Settings, press ,) to see your library.", white(0.45))
+                c.put(y + 1, left, "Log in (Settings, press ,) to see what you've saved.", white(0.45))
             elif data is None or data.get("loading"):
                 c.put(y + 1, left, "Loading…", white(0.45))
             elif data.get("error"):
@@ -511,7 +511,7 @@ class App:
         return c
 
     def draw_tabs(self, c, y, x, width):
-        # The segmented control: Now · Search · Library · Home, Settings on the right.
+        # The segmented control: Playing · Find · Saved · For you, Settings on the right.
         seg = (width - 4) // 4
         for i, (key, label) in enumerate(TABS):
             active = self.tab == key and not self.pages
@@ -576,7 +576,7 @@ class App:
         song = self.song
         if self.status != "ok" or not song:
             if self.status == "idle":
-                c.put(y + 1, x, "Nothing playing — find something in Search (2) or Home (4).", white(0.45))
+                c.put(y + 1, x, "Nothing playing — find something in Find (2) or For you (4).", white(0.45))
             return
         p = self.player
         playing = not song.get("isPaused")
@@ -870,7 +870,7 @@ class App:
             elif self.account.get("expired"):
                 note = "YouTube ended this login — sign in again."
             else:
-                note = "Not logged in — likes, Library and a personal Home need it. h: paste headers instead"
+                note = "Not logged in — likes, Saved and a personal For you need it. h: paste headers instead"
             c.put(y + 1, x, clip(note, width), white(0.45))
             button = " Waiting for Google… " if self.player.get("signingIn") else " Sign in with Google "
         bx = x + width - len(button)
