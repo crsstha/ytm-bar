@@ -7,6 +7,8 @@ browsing and radio, mpv + yt-dlp for the audio.
                           It owns mpv and the queue, and serves the commands
                           below on 127.0.0.1.
   ytm-bar start           Start the service, unless it's running.
+  ytm-bar bar [--follow]  The now-playing pill as polybar text (not JSON);
+                          --follow keeps printing it, with the wave moving.
   ytm-bar signin          Connect your YouTube Music account (likes, library,
                           personal home): sign in to Google in a browser window.
   ytm-bar login           The same, by pasting request headers from your browser.
@@ -35,12 +37,13 @@ browsing and radio, mpv + yt-dlp for the audio.
                           Replace the queue with an album, playlist or an
                           artist's songs, starting at INDEX.
 
-Every command except daemon prints one JSON object with "ok", plus "error"
+Every command except daemon and bar prints one JSON object with "ok", plus "error"
 and "code" ("offline", "unauthorized", "failed") when it didn't work.
 The live now-playing display polls GET /song directly from Panel.qml.
 """
 
 import json
+import math
 import os
 import random
 import re
@@ -1319,6 +1322,47 @@ def run(command, args):
     return result
 
 
+WAVE = "▁▂▃▄▅▆▇█"
+
+
+def polybar_label(song, phase=0.0):
+    """The pill for polybar (i3/polybar.ini), like BarWidget.qml: a wave and the
+    title, amber while playing and dimmed while paused; a music note otherwise."""
+    if not song:
+        return "%{F#707880}󰝚%{F-}"
+    title = song["title"] if len(song["title"]) <= 30 else song["title"][:29].strip() + "…"
+    title = title.replace("%", "%%")  # polybar formatting tags start with %
+    if song["isPaused"]:
+        return f"%{{F#707880}}{WAVE[0] * 4} {title}%{{F-}}"
+    # The same ripple as BarWidget.qml: each bar a sine offset from its neighbour.
+    levels = (0.5 + 0.5 * math.sin(phase + i * 0.9) * (0.65 + 0.35 * math.sin(phase * 0.37 + i * 1.7))
+              for i in range(4))
+    wave = "".join(WAVE[min(7, int(level * 8))] for level in levels)
+    return f"%{{F#F3C98B}}{wave}%{{F-}} {title}"
+
+
+def current_song():
+    try:
+        return request("GET", "/song", timeout=1)
+    except ApiError:
+        return None
+
+
+def follow_bar():
+    """For polybar's tail = true: a new line per wave frame while playing, and
+    when the song or play state changes otherwise."""
+    song, polled, phase, last = None, 0.0, 0.0, None
+    while True:
+        if time.monotonic() - polled >= 1:
+            song, polled = current_song(), time.monotonic()
+        label = polybar_label(song, phase)
+        if label != last:
+            print(label, flush=True)
+            last = label
+        phase += 0.9
+        time.sleep(0.12 if song and not song["isPaused"] else 0.5)
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
@@ -1326,6 +1370,14 @@ def main():
         return 0
     if args[0] == "daemon":
         serve()
+        return 0
+    if args[0] == "bar":
+        if "--follow" in args:
+            try:
+                follow_bar()
+            except (BrokenPipeError, KeyboardInterrupt):  # polybar restarted
+                return 0
+        print(polybar_label(current_song()))
         return 0
     try:
         result = {"ok": True, **run(args[0], args[1:])}

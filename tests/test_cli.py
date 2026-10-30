@@ -182,6 +182,13 @@ with tempfile.TemporaryDirectory() as home:
         daemon.terminate()
         daemon.wait(5)
 
+# The polybar pill: dimmed when stopped or paused, % escaped, long titles cut.
+assert bar.polybar_label(None) == "%{F#707880}󰝚%{F-}"
+assert bar.polybar_label({"title": "100% Pure", "isPaused": False}, 0).endswith("%{F-} 100%% Pure")
+assert bar.polybar_label({"title": "100% Pure", "isPaused": False}, 0) != \
+    bar.polybar_label({"title": "100% Pure", "isPaused": False}, 1.8)  # the wave moves
+assert bar.polybar_label({"title": "x" * 40, "isPaused": True}) == "%{F#707880}▁▁▁▁ " + "x" * 29 + "…%{F-}"
+
 # ytm-tui: input parsing and fitting text into cells.
 spec = spec_from_loader("ytm_tui", SourceFileLoader("ytm_tui", str(Path(CLI).parent / "ytm-tui")))
 tui = module_from_spec(spec)
