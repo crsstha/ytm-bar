@@ -660,10 +660,20 @@ Panel {
     }
   }
 
-  // A borderless icon button that lights up on hover.
+  // The shell's tooltip, in the card's dark glass and Geist.
+  component Tip: PanelToolTip {
+    panelBackground: Qt.rgba(14 / 255, 16 / 255, 20 / 255, 0.94)
+    panelBorder: root.white(0.12)
+    panelForeground: root.ink
+    fontFamily: root.sansFont
+    fontSize: 12
+  }
+
+  // A borderless icon button that lights up on hover; `tip` names it on hover.
   component IconButton: Rectangle {
     id: iconButton
     property string icon: ""
+    property string tip: ""
     property real iconSize: 16
     property color iconColor: root.white(0.55)
     signal clicked()
@@ -684,6 +694,10 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: iconButton.clicked()
+    }
+    Tip {
+      visible: iconButton.tip !== "" && iconArea.containsMouse
+      text: iconButton.tip
     }
   }
 
@@ -1084,6 +1098,7 @@ Panel {
         radius: 8
         visible: row.playable && hover.hovered
         icon: "playNext"
+        tip: "Play next"
         iconSize: 15
         iconColor: root.ink
         onClicked: root.action("add", [row.modelData.id])
@@ -1104,6 +1119,7 @@ Panel {
         readonly property bool hovered: upHover.hovered
         HoverHandler { id: upHover }
         icon: "up"
+        tip: "Play next"
         iconSize: 13
         iconColor: upHover.hovered ? "#ffffff" : root.white(0.8)
         onClicked: root.action("playnext", [String(row.modelData.index)])
@@ -1115,6 +1131,7 @@ Panel {
         color: removeHover.hovered ? Qt.rgba(1, 90 / 255, 90 / 255, 0.22) : root.white(0.06)
         HoverHandler { id: removeHover }
         icon: "close"
+        tip: "Remove from queue"
         iconSize: 13
         iconColor: removeHover.hovered ? "#ffffff" : root.white(0.8)
         onClicked: root.action("remove", [String(row.modelData.index)])
@@ -1269,6 +1286,7 @@ Panel {
           width: 36
           height: 36
           icon: "settings"
+          tip: "Settings"
           color: root.tab === "settings" ? root.white(0.12) : (hovered ? root.white(0.08) : "transparent")
           iconColor: root.tab === "settings" || hovered ? "#ffffff" : root.white(0.6)
           readonly property bool hovered: settingsHover.hovered
@@ -1451,11 +1469,13 @@ Panel {
 
                 IconButton {
                   icon: "dislike"
+                  tip: root.player.like === "DISLIKE" ? "Disliked" : "Dislike and skip"
                   iconColor: root.player.like === "DISLIKE" ? root.accent : root.white(0.55)
                   onClicked: root.action("dislike")
                 }
                 IconButton {
                   icon: root.player.like === "LIKE" ? "likeFill" : "like"
+                  tip: root.player.like === "LIKE" ? "Liked — click to undo" : "Like"
                   iconColor: root.player.like === "LIKE" ? root.accent : root.white(0.55)
                   onClicked: root.action("like")
                 }
@@ -1530,6 +1550,10 @@ Panel {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.action("sleep", ["off"])
                   }
+                  Tip {
+                    visible: sleepArea.containsMouse
+                    text: "Cancel the sleep timer"
+                  }
                 }
                 Mono {
                   anchors.right: parent.right
@@ -1556,6 +1580,7 @@ Panel {
                   height: 36
                   radius: 18
                   icon: "shuffle"
+                  tip: root.player.shuffle ? "Shuffle: on" : "Shuffle"
                   iconSize: 17
                   iconColor: root.player.shuffle ? root.accent : root.white(0.55)
                   onClicked: root.action("shuffle")
@@ -1566,6 +1591,7 @@ Panel {
                   height: 44
                   radius: 22
                   icon: "previousFill"
+                  tip: "Previous"
                   iconSize: 20
                   iconColor: "#ffffff"
                   onClicked: root.action("previous")
@@ -1589,8 +1615,13 @@ Panel {
                   MouseArea {
                     id: playArea
                     anchors.fill: parent
+                    hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.action("toggle")
+                  }
+                  Tip {
+                    visible: playArea.containsMouse
+                    text: root.playing ? "Pause" : "Play"
                   }
                 }
                 IconButton {
@@ -1599,6 +1630,7 @@ Panel {
                   height: 44
                   radius: 22
                   icon: "nextFill"
+                  tip: "Next"
                   iconSize: 20
                   iconColor: "#ffffff"
                   onClicked: root.action("next")
@@ -1609,6 +1641,7 @@ Panel {
                   height: 36
                   radius: 18
                   icon: root.player.repeat === "ONE" ? "repeatOne" : "repeat"
+                  tip: ({ NONE: "Repeat", ALL: "Repeat: all", ONE: "Repeat: this song" })[root.player.repeat] || "Repeat"
                   iconSize: 17
                   iconColor: root.player.repeat !== "NONE" ? root.accent : root.white(0.55)
                   onClicked: root.action("repeat")
@@ -1629,6 +1662,7 @@ Panel {
                 height: 28
                 radius: 8
                 icon: root.player.muted ? "muted" : "volume"
+                tip: root.player.muted ? "Unmute" : "Mute"
                 iconSize: 15
                 iconColor: root.player.muted ? root.accent : root.white(0.55)
                 onClicked: root.action("mute")
@@ -1699,6 +1733,7 @@ Panel {
                     height: 26
                     iconSize: 14
                     icon: root.queueAsList ? "grid" : "list"
+                    tip: root.queueAsList ? "Show as covers" : "Show as a list (reorder, remove)"
                     iconColor: queueModeHover.hovered ? "#ffffff" : root.white(0.45)
                     HoverHandler { id: queueModeHover }
                     onClicked: root.queueAsList = !root.queueAsList
@@ -1752,6 +1787,10 @@ Panel {
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
                       onClicked: root.action("jump", [coverCard.modelData.index])
+                    }
+                    Tip {
+                      visible: coverCardArea.containsMouse
+                      text: coverCard.modelData.title + (coverCard.modelData.artist ? " — " + coverCard.modelData.artist : "")
                     }
                   }
                 }
