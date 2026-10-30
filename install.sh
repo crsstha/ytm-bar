@@ -1,8 +1,9 @@
 #!/bin/bash
 # Install ytm-bar: the YouTube Music widget for the Omarchy bar.
 #
-#   ./install.sh                install, put the widget after the clock, start the
-#                               player service and add the keybinding
+#   ./install.sh                install, put the widget first in the bar's right
+#                               section, start the player service and add the
+#                               keybinding
 #   ./install.sh --no-bindings  skip the keybinding
 #
 # Safe to run again: links are refreshed and config blocks (between "ytm-bar"
@@ -20,7 +21,7 @@ bindings=1
 for arg in "$@"; do
   case "$arg" in
     --no-bindings) bindings=0 ;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -77,15 +78,21 @@ else
   echo "    mpv, yt-dlp, ytmusicapi and mpv-mpris are installed"
 fi
 
-echo "--> Script"
+echo "--> Scripts"
 link "$REPO/bin/ytm-bar" "$BIN/ytm-bar"
+link "$REPO/bin/ytm-tui" "$BIN/ytm-tui"
 
 echo "--> Player service"
 link "$REPO/systemd/ytm-bar.service" "$UNITS/ytm-bar.service"
 systemctl --user daemon-reload
 systemctl --user enable ytm-bar.service >/dev/null 2>&1
-systemctl --user restart ytm-bar.service
-echo "    ytm-bar.service enabled and (re)started"
+# Don't restart a running service: that would stop the music and drop the queue.
+if systemctl --user is-active --quiet ytm-bar.service; then
+  echo "    ytm-bar.service is running — 'systemctl --user restart ytm-bar' loads a newer bin/ytm-bar (stops playback)"
+else
+  systemctl --user start ytm-bar.service
+  echo "    ytm-bar.service enabled and started"
+fi
 
 echo "--> Omarchy bar plugin ($PLUGIN_ID)"
 plugin_dir="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
@@ -100,9 +107,12 @@ fi
 # A freshly linked plugin isn't known to the running shell until it rescans.
 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 if ! jq -e --arg id "$PLUGIN_ID" '[.bar.layout[]?[]?.id] | index($id)' "$HOME/.config/omarchy/shell.json" >/dev/null 2>&1; then
-  omarchy plugin enable "$PLUGIN_ID" --section center >/dev/null
-  omarchy bar move "$PLUGIN_ID" --after omarchy.clock >/dev/null 2>&1 || true
-  echo "    added to the bar (center, after the clock)"
+  # Right section, first: the pill's width follows the title, and in the centred
+  # middle section every song change would shift the clock.
+  omarchy plugin enable "$PLUGIN_ID" --section right >/dev/null
+  first="$(jq -r '.bar.layout.right[0].id // empty' "$HOME/.config/omarchy/shell.json" 2>/dev/null)"
+  [[ -n $first && $first != "$PLUGIN_ID" ]] && omarchy bar move "$PLUGIN_ID" --section right --before "$first" >/dev/null 2>&1 || true
+  echo "    added to the bar (start of the right section)"
 else
   echo "    already in the bar"
 fi

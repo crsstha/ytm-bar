@@ -182,4 +182,17 @@ with tempfile.TemporaryDirectory() as home:
         daemon.terminate()
         daemon.wait(5)
 
+# ytm-tui: input parsing and fitting text into cells.
+spec = spec_from_loader("ytm_tui", SourceFileLoader("ytm_tui", str(Path(CLI).parent / "ytm-tui")))
+tui = module_from_spec(spec)
+spec.loader.exec_module(tui)
+assert tui.read_keys("a\r\x1b[A\x1b\x7f\t\x1b[Z") == ["a", "enter", "up", "esc", "backspace", "tab", "shift-tab"]
+assert tui.read_keys("\x1b[<0;20;2M\x1b[<65;3;4M") == [("mouse", 0, 19, 1, True), ("mouse", 65, 2, 3, True)]
+assert tui.text_width("夜に駆ける") == 10 and tui.clip("夜に駆ける", 6) == "夜に…"
+assert tui.clip("Short", 10) == "Short" and tui.clip("A long title", 6) == "A lon…"
+canvas = tui.Canvas(6, 1)
+canvas.put(0, 0, "ab夜cdef", fg=tui.WHITE)
+assert canvas.chars[0] == ["a", "b", "夜", "", "c", "d"]
+assert tui.clock(185) == "3:05" and tui.white(0) == tui.BASE
+
 print("ok")
