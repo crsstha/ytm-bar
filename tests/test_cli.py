@@ -153,7 +153,16 @@ with tempfile.TemporaryDirectory() as home:
         assert cli("library")[1]["code"] == "unauthorized"
         assert cli("repeat") == (0, {"ok": True}) and cli("state")[1]["repeat"] == "ALL"
         assert cli("volume", "250") == (0, {"ok": True}) and cli("state")[1]["volume"] == 100
-        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False}
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text()) == {"volume": 100, "eq": "flat", "boost": False, "recent": []}
+
+        # Recent searches: newest first, no repeats (ignoring case), kept in state.json.
+        assert cli("recentadd", "daft", "punk")[1]["recent"] == ["daft punk"]
+        assert cli("recentadd", "Nepathya")[1]["recent"] == ["Nepathya", "daft punk"]
+        assert cli("recentadd", "DAFT PUNK")[1]["recent"] == ["DAFT PUNK", "Nepathya"]
+        assert json.loads(Path(home, "state/ytm-bar/state.json").read_text())["recent"] == ["DAFT PUNK", "Nepathya"]
+        assert cli("recentclear") == (0, {"ok": True, "recent": []})
+        assert cli("recentadd")[1]["code"] == "failed"
+        assert cli("open", "mood")[1]["code"] == "failed" and cli("playall", "mood", "x")[1]["code"] == "failed"
 
         # Boost raises the limit to 150; turning it off brings the volume back to 100.
         assert cli("boost") == (0, {"ok": True})

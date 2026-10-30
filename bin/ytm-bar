@@ -28,6 +28,9 @@ browsing and radio, mpv + yt-dlp for the audio.
   ytm-bar jump INDEX      Play the queue item at INDEX.
   ytm-bar search QUERY [--filter all|songs|videos|albums|artists|playlists]
   ytm-bar home            Your YouTube Music home page, as sections.
+  ytm-bar browse          Moods and genres to browse (open them with "open mood ID").
+  ytm-bar recent | recentadd QUERY | recentclear
+                          Your recent searches.
   ytm-bar library         Your playlists, albums and artists (needs login).
   ytm-bar playlists       The playlists you can add songs to (needs login).
   ytm-bar newplaylist TITLE [VIDEO_ID]
@@ -36,7 +39,7 @@ browsing and radio, mpv + yt-dlp for the audio.
                           Add a song to one of your playlists.
   ytm-bar save | unsave PLAYLIST_ID
                           Save someone else's playlist to your library, or remove it.
-  ytm-bar open TYPE ID    An album, artist or playlist, as sections.
+  ytm-bar open TYPE ID    An album, artist, playlist or mood, as sections.
   ytm-bar play VIDEO_ID   Play a song now, followed by its radio.
   ytm-bar add VIDEO_ID    Queue a song to play next.
   ytm-bar playall TYPE ID [INDEX]
@@ -94,6 +97,8 @@ RADIO_LIMIT = 25
 RADIO_AHEAD = 3  # fetch more radio when this few songs are left
 COLLECTION_LIMIT = 100
 HOME_TTL = 600  # seconds the home page is cached
+BROWSE_TTL = 6 * 3600  # seconds the moods and genres are cached
+RECENT_LIMIT = 8  # recent searches kept
 REPEAT_MODES = ["NONE", "ALL", "ONE"]
 LIKE_STATES = ("LIKE", "DISLIKE", "INDIFFERENT")
 COLLECTIONS = ("album", "artist", "playlist")
@@ -124,11 +129,12 @@ USAGE = {
     "newplaylist": "Usage: ytm-bar newplaylist TITLE [VIDEO_ID]",
     "addto": "Usage: ytm-bar addto PLAYLIST_ID VIDEO_ID",
     "save": "Usage: ytm-bar save PLAYLIST_ID",
+    "recentadd": "Usage: ytm-bar recentadd QUERY",
     "unsave": "Usage: ytm-bar unsave PLAYLIST_ID",
 }
 COMMANDS = {"song", "state", "queue", "toggle", "next", "previous", "like", "dislike",
             "shuffle", "repeat", "home", "library", "account", "login", "signin", "logout", "stats",
-            "playlists",
+            "playlists", "browse", "recent", "recentclear",
             "mute", "boost", *USAGE}
 
 # Equalizer presets: gains in dB for five bands, as in the design.
@@ -491,12 +497,16 @@ class Player:
         self._session = ""  # what session.json holds
         self._colors = {}  # cover URL -> cover_color(), "" while it's worked out
         self._saved = (0.0, set())  # (time, ids of the playlists in your library)
+        self._browse = (0.0, None, None)  # (time, auth, sections) for moods and genres
+        self._mood_titles = {}  # mood params -> title, for its page
+        self.recent_searches = []
         self.signin_error = ""
         try:
             saved = json.loads(STATE_FILE.read_text())
             self.volume = int(saved.get("volume", self.volume))
             self.eq = saved.get("eq") if saved.get("eq") in EQ_PRESETS else self.eq
             self.boost = bool(saved.get("boost", False))
+            self.recent_searches = [q for q in saved.get("recent", []) if isinstance(q, str)][:RECENT_LIMIT]
         except (OSError, ValueError, AttributeError):
             pass
         self.volume = min(self.volume, self.max_volume)
@@ -508,7 +518,8 @@ class Player:
     def save(self):
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost}))
+            STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost,
+                                              "recent": self.recent_searches}))
         except OSError:
             pass
 
@@ -739,6 +750,39 @@ class Player:
             self._home = (time.monotonic(), stamp, sections)
         return {"sections": sections}
 
+    # -- The search tab before you type: recent searches, moods and genres.
+
+    def recent(self, args):
+        return {"recent": self.recent_searches}
+
+    def recentadd(self, args):
+        query = " ".join(args[0].split())[:100]
+        if query:
+            rest = [q for q in self.recent_searches if q.lower() != query.lower()]
+            self.recent_searches = [query] + rest[:RECENT_LIMIT - 1]
+            self.save()
+        return {"recent": self.recent_searches}
+
+    def recentclear(self, args):
+        self.recent_searches = []
+        self.save()
+        return {"recent": []}
+
+    def browse(self, args):
+        """Moods & moments and genres, as tiles; "For you" first when logged in."""
+        stamp = self.auth_stamp()
+        cached_at, cached_auth, sections = self._browse
+        if sections is None or cached_auth != stamp or time.monotonic() - cached_at > BROWSE_TTL:
+            sections = []
+            for title, items in self.call("get_mood_categories").items():
+                tiles = [{"type": "mood", "id": c["params"], "title": c["title"]} for c in items if c.get("params")]
+                for tile in tiles:
+                    self._mood_titles[tile["id"]] = tile["title"]
+                if tiles:
+                    sections.append({"title": title, "items": tiles[:12]})
+            self._browse = (time.monotonic(), stamp, sections)
+        return {"sections": sections}
+
     def library(self, args):
         if not self.logged_in:
             raise ApiError("unauthorized", "Log in (Settings) to see your library")
@@ -827,6 +871,11 @@ class Player:
                     "subtitle": joined(album.get("type") or "Album", artists_of(album), album.get("year") or "",
                                        f"{count} songs" if count else ""),
                     "sections": [{"title": "Songs", "items": rows}]}
+        if kind == "mood":
+            rows = entries_of(self.call("get_mood_playlists", item_id), 60)
+            return {"type": kind, "id": item_id, "title": self._mood_titles.get(item_id, "Playlists"),
+                    "image": "", "subtitle": f"{len(rows)} playlists", "owned": True,
+                    "sections": [{"title": "Playlists", "items": rows}]}
         if kind == "playlist":
             playlist = self.call("get_playlist", item_id, limit=COLLECTION_LIMIT)
             self.collections[kind, item_id] = self.remember(playlist.get("tracks"))
@@ -1254,7 +1303,9 @@ class Player:
         handler = getattr(self, command + "_", None) or getattr(self, command, None)
         if command not in COMMANDS or handler is None:
             raise ApiError("failed", f"Unknown command {command!r}")
-        if command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
+        if command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS + (("mood",) if command == "open" else ())):
+            raise ApiError("failed", USAGE[command])
+        if command == "recentadd" and not (args and str(args[0]).strip()):
             raise ApiError("failed", USAGE[command])
         if (command == "newplaylist" and not (args and str(args[0]).strip())) or (command == "addto" and len(args) < 2) \
                 or (command in ("save", "unsave") and not (args and args[0])):
@@ -1444,12 +1495,16 @@ def run(command, args):
         raise ApiError("failed", USAGE["addto"])
     elif command in ("save", "unsave") and not (args and args[0]):
         raise ApiError("failed", USAGE[command])
-    elif command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS):
+    elif command in ("open", "playall") and (len(args) < 2 or args[0] not in COLLECTIONS + (("mood",) if command == "open" else ())):
         raise ApiError("failed", USAGE[command])
+    elif command == "recentadd" and not (args and " ".join(args).strip()):
+        raise ApiError("failed", USAGE["recentadd"])
+    elif command == "recentadd":
+        args = [" ".join(args)]
     elif command == "login":
         args = [read_headers()]
     slow = command in ("search", "home", "library", "open", "playall", "login", "account",
-                       "playlists", "newplaylist", "addto", "save", "unsave")
+                       "playlists", "newplaylist", "addto", "save", "unsave", "browse")
     if command == "signin":
         result = request("POST", "/signin", {"args": []}, timeout=10)
         if not result.get("ok"):
