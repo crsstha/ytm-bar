@@ -107,7 +107,9 @@ STATE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")
 SESSION_FILE = STATE_FILE.parent / "session.json"
 SESSION_EVERY = 5  # seconds between saves while something is loaded
 SESSION_LIMIT = 200  # songs kept
-MPV_SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "ytm-bar-mpv.sock"
+# In the private folder with the token, never a shared one like /tmp, where
+# another account could put its own socket there first.
+MPV_SOCKET = RUN_DIR / "mpv.sock"
 SERVICE = "ytm-bar.service"
 WATCH_URL = "https://music.youtube.com/watch?v="
 QUEUE_LIMIT = 100  # songs after the current one sent to the popup and ytm-tui
@@ -520,6 +522,8 @@ class Mpv:
         self.lock = threading.Lock()
         self.waiting = {}
         self.next_id = 0
+        MPV_SOCKET.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(MPV_SOCKET.parent, 0o700)
         MPV_SOCKET.unlink(missing_ok=True)
         self.proc = subprocess.Popen([
             "mpv", "--idle=yes", "--no-video", "--no-terminal", "--audio-display=no",

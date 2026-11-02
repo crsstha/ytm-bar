@@ -218,7 +218,7 @@ with tempfile.TemporaryDirectory() as home:
         assert cli("mute") == (0, {"ok": True}) and cli("state")[1]["muted"] is True
         assert cli("remove", "3")[1]["error"] == "That song isn't in the queue any more"
         assert cli("move", "3")[1]["error"] == bar.USAGE["move"]
-        assert not Path(home, "ytm-bar-mpv.sock").exists()
+        assert not Path(home, "ytm-bar/mpv.sock").exists()
     finally:
         daemon.terminate()
         daemon.wait(5)
