@@ -34,19 +34,32 @@ bar loads.
 terminal), Chromium, Chrome or Brave (Sign in with Google). Without
 `python-pillow` the card stays amber instead of taking the cover's colour.
 
-**Extras (optional)** — run `install.sh` from the plugin folder:
+**Then run `install.sh` for the rest.** `omarchy plugin add` (and `omarchy
+plugin update`) only fetch the plugin; they never run its scripts. Without
+`install.sh` you have the bar widget and the player, but **no blur, no
+`Super+Alt+M`** and none of the rest below. Run it yourself, and again after an
+update:
 
 ```bash
-~/.config/omarchy/plugins/crsstha.ytmusic/install.sh    # --no-bindings to skip the keybinding
+~/.config/omarchy/plugins/crsstha.ytmusic/install.sh
+omarchy restart shell
 ```
 
-It adds the `ytm-bar` and `ytm-tui` commands to `~/.local/bin`, a
-`ytm-bar.service` user unit (so the player, and your queue, are back at login),
-and a block in `~/.config/hypr/bindings.lua` between `ytm-bar` marker lines:
-`Super+Alt+M`, blur behind the popup, and floating windows for sign-in and
-`ytm-tui`. If Hyprland's blur is off (Omarchy's default), the block also turns
-it on with app windows left unblurred, so only the popup changes; `--no-blur`
-skips that. Nothing else in your configuration is changed.
+It adds:
+
+- **Blur behind the popup.** If Hyprland's blur is off (Omarchy's default), it
+  turns it on with app windows left unblurred, so only the popup changes.
+  `--no-blur` leaves Hyprland's blur as it is.
+- **`Super+Alt+M`** to open and close the player.
+- Floating windows for Sign in with Google and `ytm-tui`.
+- The `ytm-bar` and `ytm-tui` commands in `~/.local/bin`.
+- A `ytm-bar.service` user unit, so the player, and your queue, are back at
+  login.
+
+The Hyprland lines go in one block in `~/.config/hypr/bindings.lua`, between
+`ytm-bar` marker lines (`--no-bindings` leaves it out); `uninstall.sh` removes
+it. Nothing else in your
+configuration is changed.
 
 **Log in (optional)** — for likes, your library and a personal home page:
 ⚙ Settings → **Sign in with Google**. A small window opens on Google's sign-in
