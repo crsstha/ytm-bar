@@ -18,7 +18,8 @@ unlink_if_ours() {  # only remove links that point into this repo
 remove_block() {
   local target=$1
   [[ -f $target ]] && grep -q ">>> $NAME >>>" "$target" || return 0
-  sed -i "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
+  # The block, and the blank line install.sh put before it.
+  sed -i -e "/^\$/{N;/\n.*>>> $NAME >>>/D}" -e "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
   echo "    removed ytm-bar block from $target"
 }
 
