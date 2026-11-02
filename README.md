@@ -44,7 +44,9 @@ It adds the `ytm-bar` and `ytm-tui` commands to `~/.local/bin`, a
 `ytm-bar.service` user unit (so the player, and your queue, are back at login),
 and a block in `~/.config/hypr/bindings.lua` between `ytm-bar` marker lines:
 `Super+Alt+M`, blur behind the popup, and floating windows for sign-in and
-`ytm-tui`. Nothing else in your configuration is changed.
+`ytm-tui`. If Hyprland's blur is off (Omarchy's default), the block also turns
+it on with app windows left unblurred, so only the popup changes; `--no-blur`
+skips that. Nothing else in your configuration is changed.
 
 **Log in (optional)** — for likes, your library and a personal home page:
 ⚙ Settings → **Sign in with Google**. A small window opens on Google's sign-in
@@ -115,11 +117,9 @@ ytm-bar song | queue | stats | signin | logout  # ytm-bar --help for all
 - **"YouTube ended this login"** — sign in again from Settings.
 - **Search fails or songs skip** — ytmusicapi or yt-dlp needs an update
   (`omarchy update`); YouTube changes break them for a few days at a time.
-- **No blur behind the popup** — run `install.sh` (it adds the blur rule), then
-  `omarchy restart shell`. Updating from 1.0.0? Run it again: the rule changed.
-  Omarchy also turns blur off by default; to turn it on (for all see-through
-  windows, not just the card) add this to `~/.config/hypr/looknfeel.lua`:
-  `hl.config({ decoration = { blur = { enabled = true, size = 12, passes = 3 } } })`
+- **No blur behind the popup** — run `install.sh` (it adds the blur rule, and
+  turns Hyprland's blur on for the popup if it's off), then `omarchy restart
+  shell`. Updating from an earlier version? Run it again: the rule changed.
 - **Card stays amber** — `python-pillow` is missing: `omarchy pkg add
   python-pillow`, then `systemctl --user restart ytm-bar`.
 - **Edited the code?** `omarchy restart shell` for the QML,

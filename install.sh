@@ -4,7 +4,8 @@
 #   ./install.sh                install, put the widget first in the bar's right
 #                               section, start the player service and add the
 #                               keybinding
-#   ./install.sh --no-bindings  skip the keybinding
+#   ./install.sh --no-bindings  skip the keybinding (and the blur)
+#   ./install.sh --no-blur      leave Hyprland's blur as it is
 #
 # Safe to run again: links are refreshed and config blocks (between "ytm-bar"
 # marker comments, which uninstall.sh removes) are replaced with the latest.
@@ -18,10 +19,12 @@ UNITS="$HOME/.config/systemd/user"
 PACKAGES=(mpv yt-dlp python-ytmusicapi mpv-mpris python-pillow)
 
 bindings=1
+blur=1
 for arg in "$@"; do
   case "$arg" in
     --no-bindings) bindings=0 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-blur) blur=0 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -117,7 +120,21 @@ if ! jq -e --arg id "$PLUGIN_ID" '[.bar.layout[]?[]?.id] | index($id)' "$HOME/.c
 else
   echo "    already in the bar"
 fi
-(( bindings )) && add_block "$REPO/omarchy/bindings.lua" "$HOME/.config/hypr/bindings.lua"
+if (( bindings )); then
+  hypr_bindings="$HOME/.config/hypr/bindings.lua"
+  snippet="$REPO/omarchy/bindings.lua"
+  # The card can't be blurred while Hyprland's blur is off (Omarchy's default).
+  # Then the block turns it on too, for the card alone (omarchy/blur.lua). Kept
+  # on a re-run, when it's the block's own lines that turned blur on.
+  if (( blur )) && { grep -q "install.sh adds this only" "$hypr_bindings" 2>/dev/null ||
+       hyprctl getoption decoration:blur:enabled 2>/dev/null | grep -q false; }; then
+    snippet="$(mktemp)"
+    trap 'rm -f "$snippet"' EXIT
+    { sed '$d' "$REPO/omarchy/bindings.lua"; cat "$REPO/omarchy/blur.lua"; tail -1 "$REPO/omarchy/bindings.lua"; } >"$snippet"
+    echo "    Hyprland's blur was off: turning it on for the card only (--no-blur to skip)"
+  fi
+  add_block "$snippet" "$hypr_bindings"
+fi
 # The Pear Desktop version started the app at login; the service replaces that.
 remove_block "$HOME/.config/hypr/autostart.lua"
 hyprctl reload >/dev/null 2>&1 || true
