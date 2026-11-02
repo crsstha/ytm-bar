@@ -111,6 +111,58 @@ SESSION_LIMIT = 200  # songs kept
 # another account could put its own socket there first.
 MPV_SOCKET = RUN_DIR / "mpv.sock"
 SERVICE = "ytm-bar.service"
+# Requests carry at most this much JSON; more is refused unread.
+MAX_BODY = 1 << 20
+# Connections served at once; others are closed (a request waits at most
+# REQUEST_TIMEOUT seconds for its client).
+MAX_CONNECTIONS = 32
+REQUEST_TIMEOUT = 10
+
+
+def plugin_version():
+    """This checkout's version, from manifest.json next to bin/."""
+    try:
+        manifest = Path(os.path.realpath(__file__)).parent.parent / "manifest.json"
+        return str(json.loads(manifest.read_text()).get("version") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+# The service keeps the version it started with; `ytm-bar start` restarts it
+# when the files on disk are newer (an update), so fixes take effect.
+VERSION = plugin_version()
+
+
+def tcp_sockets():
+    """(local port, remote port, state, uid) of the machine's TCP sockets."""
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(name) as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            try:
+                yield (int(fields[1].rsplit(":", 1)[1], 16), int(fields[2].rsplit(":", 1)[1], 16),
+                       fields[3], int(fields[7]))
+            except (IndexError, ValueError):
+                pass
+
+
+def port_owner():
+    """Whose program listens on the service's port: "me", "other" (another
+    account's, which is never sent the token or a request) or None."""
+    uids = {uid for local, _, state, uid in tcp_sockets() if local == PORT and state == "0A"}
+    if not uids:
+        return None
+    return "me" if uids == {os.getuid()} else "other"
+
+
+def peer_is_me(client_port):
+    """Whether the connection from client_port comes from this user's program."""
+    return any(local == client_port and remote == PORT and uid == os.getuid()
+               for local, remote, _, uid in tcp_sockets())
 WATCH_URL = "https://music.youtube.com/watch?v="
 QUEUE_LIMIT = 100  # songs after the current one sent to the popup and ytm-tui
 RADIO_LIMIT = 25
@@ -345,7 +397,8 @@ def profile_headers(profile):
     # --password-store=basic (see Player.signin) encrypts with a fixed key, so
     # no keyring is needed to read them back.
     jar = extract_cookies_from_browser("chromium", profile=str(profile), keyring="BASICTEXT")
-    cookies = {c.name: c.value for c in jar if (c.domain or "").endswith("youtube.com")}
+    cookies = {c.name: c.value for c in jar
+               if (c.domain or "").lstrip(".") == "youtube.com" or (c.domain or "").endswith(".youtube.com")}
     if not cookies.get("__Secure-3PAPISID"):
         return None
     from ytmusicapi.helpers import get_authorization
@@ -360,6 +413,9 @@ def profile_headers(profile):
     ])
 
 
+MAX_IMAGE = 5 << 20  # bytes read of a cover
+
+
 def cover_color(url):
     """The cover's most vivid common colour, made light enough to read on the
     dark card ("#rrggbb"), or "" without Pillow or the image."""
@@ -367,8 +423,10 @@ def cover_color(url):
         import colorsys
         import io
         from PIL import Image
+        if not url.startswith("https://"):
+            return ""
         with urllib.request.urlopen(url, timeout=8) as resp:
-            image = Image.open(io.BytesIO(resp.read())).convert("RGB")
+            image = Image.open(io.BytesIO(resp.read(MAX_IMAGE))).convert("RGB")
     except Exception:
         return ""
     image.thumbnail((48, 48))
@@ -881,6 +939,7 @@ class Player:
             "signingIn": self.signing_in,
             "signinError": self.signin_error,
             "signinStage": self.signin_stage if self.signing_in else "",
+            "version": VERSION,
             **self.queue(args),
         }
 
@@ -1173,6 +1232,7 @@ class Player:
 
     def logout(self, args):
         AUTH_FILE.unlink(missing_ok=True)
+        AUTH_FILE.with_suffix(".expired").unlink(missing_ok=True)
         self._account = (None, None)
         # Forget the sign-in window's profile too, or it would log back in.
         subprocess.run(["rm", "-rf", "--", str(SIGNIN_PROFILE)], check=False)
@@ -1611,6 +1671,8 @@ def serve():
     player = Player()
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = REQUEST_TIMEOUT  # a client that sends nothing is dropped
+
         def reply(self, status, body=None):
             data = json.dumps(body).encode() if body is not None else b""
             self.send_response(status)
@@ -1638,6 +1700,9 @@ def serve():
                 song = player.song([])
             except ApiError as e:
                 return self.reply(500, {"ok": False, "code": e.code, "error": str(e)})
+            except Exception:
+                traceback.print_exc()
+                return self.reply(500, {"ok": False, "code": "failed", "error": "Internal error"})
             self.reply(200, song) if song else self.reply(204)
 
         def do_POST(self):
@@ -1645,7 +1710,15 @@ def serve():
                 return
             try:
                 length = int(self.headers.get("Content-Length") or 0)
-                args = json.loads(self.rfile.read(length) or b"{}").get("args") or []
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_BODY:
+                return self.reply(413, {"ok": False, "code": "failed", "error": "Bad request size"})
+            try:
+                sent = json.loads(self.rfile.read(length) or b"{}")
+                args = (sent.get("args") or []) if isinstance(sent, dict) else None
+                if not isinstance(args, list):
+                    raise ValueError("expected {\"args\": [...]}")
                 command = self.path.strip("/")
                 result = player.run(command, [str(a) for a in args])
                 if command == "song":
@@ -1653,15 +1726,41 @@ def serve():
                 body = {"ok": True, **(result or {})}
             except ApiError as e:
                 body = {"ok": False, "code": e.code, "error": str(e)}
-            except (ValueError, IndexError) as e:
+            except (ValueError, IndexError, OverflowError) as e:
                 body = {"ok": False, "code": "failed", "error": f"Bad request: {e}"}
+            except Exception:
+                traceback.print_exc()
+                body = {"ok": False, "code": "failed", "error": "Internal error"}
             self.reply(200, body)
 
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    server.daemon_threads = True
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+        def verify_request(self, request, client_address):
+            # Other accounts can reach 127.0.0.1 too: close their connections
+            # before reading a byte, so they can't hold the service's threads.
+            return peer_is_me(client_address[1])
+
+        def process_request(self, request, client_address):
+            if not self.slots.acquire(blocking=False):
+                return self.shutdown_request(request)
+            try:
+                super().process_request(request, client_address)
+            except Exception:
+                self.slots.release()
+                raise
+
+        def process_request_thread(self, request, client_address):
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self.slots.release()
+
+    server = Server(("127.0.0.1", PORT), Handler)
     # Only once the port is ours, so a second copy can't replace the secret.
     token = make_token()
 
@@ -1695,6 +1794,12 @@ def serve():
     try:
         server.serve_forever()
     finally:
+        # A stopped service leaves no secret behind.
+        try:
+            if TOKEN_FILE.read_text() == token:
+                TOKEN_FILE.unlink()
+        except OSError:
+            pass
         if player.mpv:
             try:
                 player.save_session()  # the exact position, not up to 5 s old
@@ -1737,6 +1842,8 @@ def make_private():
     """Close up what versions before 1.0.3 left readable by other accounts
     (umask 022): the state folder, with recent searches and the queue, and
     the config folder."""
+    if RUN_DIR != CONFIG:
+        (CONFIG / "token").unlink(missing_ok=True)  # where 1.0.1 and older kept it
     for folder in (CONFIG, STATE_FILE.parent):
         try:
             if folder.is_symlink() or not folder.is_dir():
@@ -1750,6 +1857,12 @@ def make_private():
 
 
 def request(method, path, body=None, timeout=5):
+    owner = port_owner()
+    if owner is None:
+        raise ApiError("offline", "The ytm-bar service isn't running — run ytm-bar start")
+    if owner == "other":
+        raise ApiError("taken", f"Another account's program is using port {PORT}, so ytm-bar won't "
+                                "talk to it. Set YTM_BAR_PORT to a free port, or stop that program.")
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(API + path, data=data, method=method, headers={HEADER: read_token()})
     if data is not None:
@@ -1769,12 +1882,68 @@ def running():
         request("GET", "/song", timeout=1)
         return True
     except ApiError as e:
+        if e.code == "taken":
+            raise
         return e.code != "offline"
 
 
+def listener_pid():
+    """The pid of this user's program listening on the service's port, or None."""
+    inodes = set()
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(name) as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            try:
+                if (int(fields[1].rsplit(":", 1)[1], 16) == PORT and fields[3] == "0A"
+                        and int(fields[7]) == os.getuid()):
+                    inodes.add(f"socket:[{fields[9]}]")
+            except (IndexError, ValueError):
+                pass
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if any(os.readlink(fd) in inodes for fd in (proc / "fd").iterdir()):
+                return int(proc.name)
+        except OSError:
+            continue
+    return None
+
+
+def stop_old_service():
+    """Stop the service on the port: it runs older code than the files on disk."""
+    pid = listener_pid()
+    if pid is None:
+        return
+    main = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", SERVICE],
+                          capture_output=True, text=True).stdout.strip()
+    if main == str(pid):
+        subprocess.run(["systemctl", "--user", "stop", SERVICE], capture_output=True)
+    else:  # started detached by `ytm-bar start`
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + 10
+    while port_owner() == "me" and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
 def start():
+    """Start the service, or restart it when it's older than this checkout."""
     if running():
-        return {}
+        try:
+            current = request("POST", "/state", {"args": []}, timeout=5).get("version", "")
+        except ApiError:
+            current = VERSION
+        if current == VERSION:
+            return {}
+        stop_old_service()
     started = subprocess.run(["systemctl", "--user", "start", SERVICE], capture_output=True).returncode == 0
     if not started:  # not installed as a unit: run it detached instead
         subprocess.Popen([os.path.realpath(sys.argv[0]), "daemon"], start_new_session=True,

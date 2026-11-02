@@ -1,5 +1,6 @@
 """Checks ytm-bar's result parsing, the service's request guard and error JSON:
 python3 tests/test_cli.py   (needs no network, mpv or ytmusicapi)"""
+import http.client
 import json
 import os
 import socket
@@ -146,6 +147,12 @@ with tempfile.TemporaryDirectory() as home:
     def mode(path):
         return os.stat(path).st_mode & 0o777
 
+    # An expired login, and the token 1.0.1 and older kept in ~/.config/ytm-bar.
+    config_dir = Path(home, ".config/ytm-bar")
+    config_dir.mkdir(parents=True)
+    Path(config_dir, "browser.expired").write_text("{}")
+    Path(config_dir, "token").write_text("old")
+
     # The service, with nothing playing (mpv only starts on first play).
     daemon = subprocess.Popen([CLI, "daemon"], env=env, umask=0o022)
     try:
@@ -169,11 +176,53 @@ with tempfile.TemporaryDirectory() as home:
         # Recent searches and the queue are closed up when the service starts.
         assert mode(state_dir) == 0o700
         assert mode(state_dir / "state.json") == 0o600 and mode(state_dir / "session.json") == 0o600
+        assert not Path(config_dir, "token").exists()
         token = open(token_file).read()
         assert get({bar.HEADER: token}) == 204
         assert get({}) == 403  # a web page can't send the header
         assert get({bar.HEADER: "1"}) == 403  # another account can't read the secret
         assert get({bar.HEADER: token, "Host": "evil.example:80"}) == 403  # DNS rebinding
+
+        # Bad sizes and bodies get an answer; the service carries on.
+        def post(body, length=None):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.putrequest("POST", "/sleep")
+            conn.putheader(bar.HEADER, token)
+            conn.putheader("Content-Length", str(len(body) if length is None else length))
+            conn.endheaders(body)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read())
+        assert post(b"[1]") == (200, {"ok": False, "code": "failed", "error": 'Bad request: expected {"args": [...]}'})
+        assert post(b'{"args": "30"}')[1]["error"] == 'Bad request: expected {"args": [...]}'
+        assert post(b'{"args": ["1e400"]}')[1]["ok"] is False
+        assert post(b"{}", length=-1)[0] == 413
+        assert post(b"{}", length=bar.MAX_BODY + 1)[0] == 413
+        assert get({bar.HEADER: token}) == 204
+
+        # Only this user's programs: another account's listener is sent nothing,
+        # and the service closes another account's connections unread.
+        bar.PORT = port
+        assert bar.port_owner() == "me"
+        real_getuid = os.getuid
+        os.getuid = lambda: real_getuid() + 1
+        try:
+            assert bar.port_owner() == "other"
+            try:
+                bar.request("GET", "/song")
+                raise AssertionError("sent a request to another account's program")
+            except bar.ApiError as e:
+                assert e.code == "taken"
+            with socket.create_connection(("127.0.0.1", port)) as conn:
+                assert not bar.peer_is_me(conn.getsockname()[1])
+        finally:
+            os.getuid = real_getuid
+        with socket.create_connection(("127.0.0.1", port)) as conn:
+            assert bar.peer_is_me(conn.getsockname()[1])
+        bar.PORT = int(os.environ.get("YTM_BAR_PORT", "26539"))
+
+        # Same version as the files on disk: `start` leaves it running.
+        assert cli("state")[1]["version"] == bar.VERSION == json.loads(Path(CLI).parent.parent.joinpath("manifest.json").read_text())["version"]
+        assert cli("start")[0] == 0 and daemon.poll() is None
 
         assert cli("song") == (0, {"ok": True, "song": None})
         code, state = cli("state")
@@ -219,9 +268,21 @@ with tempfile.TemporaryDirectory() as home:
         assert cli("remove", "3")[1]["error"] == "That song isn't in the queue any more"
         assert cli("move", "3")[1]["error"] == bar.USAGE["move"]
         assert not Path(home, "ytm-bar/mpv.sock").exists()
+
+        assert cli("logout") == (0, {"ok": True, "loggedIn": False})
+        assert not Path(config_dir, "browser.expired").exists()  # an expired login is forgotten too
+
+        # An update: `start` stops the older service on the port (here one started
+        # without systemd, so with SIGTERM), which saves and exits cleanly.
+        bar.PORT = port
+        assert bar.listener_pid() == daemon.pid
+        bar.stop_old_service()
+        assert daemon.wait(5) == 0 and bar.port_owner() is None
+        bar.PORT = int(os.environ.get("YTM_BAR_PORT", "26539"))
     finally:
         daemon.terminate()
         daemon.wait(5)
+    assert not os.path.exists(token_file)  # a stopped service leaves no secret behind
 
 # ytm-tui: input parsing and fitting text into cells.
 spec = spec_from_loader("ytm_tui", SourceFileLoader("ytm_tui", str(Path(CLI).parent / "ytm-tui")))
@@ -234,6 +295,9 @@ assert tui.clip("Short", 10) == "Short" and tui.clip("A long title", 6) == "A lo
 canvas = tui.Canvas(6, 1)
 canvas.put(0, 0, "ab夜cdef", fg=tui.WHITE)
 assert canvas.chars[0] == ["a", "b", "夜", "", "c", "d"]
+canvas = tui.Canvas(6, 1)
+canvas.put(0, 0, "a\x1b]52;c;eA==\x07b")  # an escape sequence in a title stays text
+assert "\x1b" not in "".join(canvas.chars[0]) and "\x07" not in "".join(canvas.chars[0])
 assert tui.clock(185) == "3:05" and tui.white(0) == tui.BASE
 
 print("ok")

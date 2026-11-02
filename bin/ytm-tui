@@ -92,7 +92,37 @@ def token():
         return ""
 
 
+def port_owner():
+    """Whose program listens on the service's port: "me", "other" or None
+    (bin/ytm-bar port_owner). Another account's program is sent nothing."""
+    uids = set()
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(name) as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            try:
+                if int(fields[1].rsplit(":", 1)[1], 16) == PORT and fields[3] == "0A":
+                    uids.add(int(fields[7]))
+            except (IndexError, ValueError):
+                pass
+    if not uids:
+        return None
+    return "me" if uids == {os.getuid()} else "other"
+
+
+TAKEN = {"ok": False, "code": "taken",
+         "error": "Another account's program is using the player's port — ytm-bar won't talk to it"}
+
+
 def call(command, args=(), timeout=10):
+    owner = port_owner()
+    if owner != "me":
+        return TAKEN if owner else {"ok": False, "code": "offline",
+                                    "error": "The player isn't running — press Enter to start it"}
     body = json.dumps({"args": [str(a) for a in args]}).encode()
     req = urllib.request.Request(API + "/" + command, data=body, method="POST",
                                  headers={"X-Ytm-Bar": token(), "Content-Type": "application/json"})
@@ -105,6 +135,8 @@ def call(command, args=(), timeout=10):
 
 def get_song():
     """The current song, None when nothing is loaded, or "offline"."""
+    if port_owner() != "me":
+        return "offline"
     req = urllib.request.Request(API + "/song", headers={"X-Ytm-Bar": token()})
     try:
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -147,8 +179,10 @@ class Art:
         pixels = None
         try:
             from PIL import Image
+            if not url.startswith("https://"):
+                raise ValueError(url)
             with urllib.request.urlopen(url, timeout=10) as resp:
-                image = Image.open(io.BytesIO(resp.read())).convert("RGB")
+                image = Image.open(io.BytesIO(resp.read(5 << 20))).convert("RGB")
             side = min(image.size)  # crop to a square, like the design's art
             left, top = (image.width - side) // 2, (image.height - side) // 2
             image = image.crop((left, top, left + side, top + side)).resize((cols, rows * 2), Image.LANCZOS)
@@ -203,6 +237,10 @@ class Canvas:
             return x
         end = min(self.w, limit if limit is not None else self.w)
         for ch in text:
+            # Control characters (ESC and the like) in a title would reach the
+            # terminal as escape sequences: drop them.
+            if unicodedata.category(ch)[0] == "C":
+                continue
             w = cell_width(ch)
             if w == 0:
                 continue

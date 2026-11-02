@@ -306,6 +306,13 @@ Panel {
 
   // ---- The service. Every command answers one JSON object with "ok".
   function call(command, args, done) {
+    var owner = root.serviceOwner()
+    if (owner !== "me") {
+      if (done) done({ ok: false, code: owner ? "taken" : "offline",
+                       error: owner ? "Another account's program is using the player's port — ytm-bar won't talk to it"
+                                    : "The player service isn't running" })
+      return
+    }
     var xhr = new XMLHttpRequest()
     xhr.onreadystatechange = function() {
       if (xhr.readyState !== XMLHttpRequest.DONE) return
@@ -328,6 +335,15 @@ Panel {
     if (pollRequest) {
       pollRequest.abort()
       pollRequest = null
+    }
+    if (root.serviceOwner() !== "me") {
+      root.song = null
+      root.status = "offline"
+      if (!root.autoStartTried) {
+        root.autoStartTried = true
+        root.startApp()
+      }
+      return
     }
     var xhr = new XMLHttpRequest()
     pollRequest = xhr
@@ -390,6 +406,32 @@ Panel {
     printErrors: false
   }
   function token() { return tokenFile.loaded ? tokenFile.text().trim() : "" }
+
+  // Whose program listens on the service's port: "me", "other" or "" (none).
+  // Other accounts can listen on 127.0.0.1 too; theirs is never sent the
+  // secret or a request (bin/ytm-bar port_owner).
+  FileView { id: tcp4; path: "/proc/net/tcp"; blockLoading: true; printErrors: false }
+  FileView { id: tcp6; path: "/proc/net/tcp6"; blockLoading: true; printErrors: false }
+  FileView { id: selfStatus; path: "/proc/self/status"; blockLoading: true; printErrors: false }
+  readonly property int myUid: {
+    var m = /^Uid:\s+(\d+)/m.exec(selfStatus.text())
+    return m ? parseInt(m[1]) : -1
+  }
+  readonly property int port: parseInt(root.api.split(":").pop())
+  function serviceOwner() {
+    tcp4.reload()
+    tcp6.reload()
+    var owner = ""
+    var lines = (tcp4.text() + "\n" + tcp6.text()).split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var f = lines[i].trim().split(/\s+/)
+      if (f.length < 8 || f[3] !== "0A") continue
+      if (parseInt(f[1].split(":").pop(), 16) !== root.port) continue
+      if (parseInt(f[7]) !== root.myUid) return "other"
+      owner = "me"
+    }
+    return owner
+  }
 
   function syncElapsed(reported, sameSong) {
     var now = Date.now()
@@ -722,6 +764,10 @@ Panel {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.poll()
+    Component.onCompleted: {
+      root.autoStartTried = true
+      root.startApp()
+    }
   }
 
   // Like/shuffle/repeat/volume/queue only matter while the popup is open.
