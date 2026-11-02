@@ -38,7 +38,10 @@ Panel {
   property color accent: song && song.color ? song.color : defaultAccent
   Behavior on accent { ColorAnimation { duration: 700; easing.type: Easing.InOutQuad } }
   readonly property color ink: "#f2f2f0"
-  readonly property color cardTint: Qt.rgba(18 / 255, 20 / 255, 24 / 255, 0.62)
+  // See-through over Hyprland's blur; solid when the blur is off (Omarchy's
+  // default), so what's behind doesn't show through sharp.
+  property bool blurOn: true
+  readonly property color cardTint: Qt.rgba(18 / 255, 20 / 255, 24 / 255, blurOn ? 0.62 : 1)
   readonly property color glow: Qt.rgba(accent.r, accent.g, accent.b, 0.24)
   // Up next as a row of covers, or the editable list.
   property bool queueAsList: false
@@ -230,6 +233,7 @@ Panel {
   ]
 
   function open() {
+    blurCheck.running = true
     if (root.tab === "now" && !root.song && root.pages.length === 0) root.setTab("search")
     root.controller.show()
     root.refreshPlayer()
@@ -358,6 +362,22 @@ Panel {
     xhr.send()
   }
   property var pollRequest: null
+
+  // Is Hyprland's blur on? Asked when the bar loads and each time the card
+  // opens, since `hyprctl reload` or install.sh can change it.
+  Process {
+    id: blurCheck
+    running: true
+    command: ["hyprctl", "-j", "getoption", "decoration:blur:enabled"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          root.blurOn = JSON.parse(text).bool !== false
+        } catch (e) {}
+      }
+    }
+  }
 
   function syncElapsed(reported, sameSong) {
     var now = Date.now()
@@ -1472,6 +1492,10 @@ Panel {
     // Our own layer name, so the blur rule (omarchy/bindings.lua) only
     // reaches this card and not every Omarchy panel.
     WlrLayershell.namespace: "ytm-bar"
+    // Ask Hyprland to blur behind the card itself (ext-background-effect), so
+    // it's blurred even without a layer rule or Hyprland's blur switched on.
+    property Item cardSurface: null
+    BackgroundEffect.blurRegion: Region { item: panel.cardSurface; radius: root.cardRadius }
     // No inner padding: the content sets its own, like the design.
     padding: 0
     contentWidth: panel.fittedContentWidth(420)
@@ -1484,6 +1508,7 @@ Panel {
         if ("borderSpec" in card && "color" in card) {
           card.color = Qt.binding(function() { return root.cardTint })
           card.radius = root.cardRadius
+          panel.cardSurface = card
           return
         }
       }
