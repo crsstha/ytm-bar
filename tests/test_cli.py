@@ -97,6 +97,18 @@ assert len(bar.search_sections(many, "songs")[0]["items"]) == bar.FILTERS["songs
 assert bar.search_sections([], "albums") == [] and bar.search_sections(None) == []
 
 
+# write_private: a new file and folder only this user can open, whatever the umask.
+with tempfile.TemporaryDirectory() as tmp:
+    old = os.umask(0o022)
+    try:
+        bar.write_private(Path(tmp, "new/session.json"), "{}")
+    finally:
+        os.umask(old)
+    assert os.stat(Path(tmp, "new")).st_mode & 0o777 == 0o700
+    assert os.stat(Path(tmp, "new/session.json")).st_mode & 0o777 == 0o600
+    assert os.listdir(Path(tmp, "new")) == ["session.json"]
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -123,8 +135,19 @@ with tempfile.TemporaryDirectory() as home:
     assert cli("play")[1]["error"] == "Usage: ytm-bar play VIDEO_ID"
     assert cli("dance")[1]["code"] == "failed"
 
+    # What an older version left with umask 022: readable by other accounts.
+    state_dir = Path(home, "state/ytm-bar")
+    state_dir.mkdir(parents=True, mode=0o755)
+    os.chmod(state_dir, 0o755)
+    for name in ("state.json", "session.json"):
+        Path(state_dir, name).write_text("{}")
+        os.chmod(state_dir / name, 0o644)
+
+    def mode(path):
+        return os.stat(path).st_mode & 0o777
+
     # The service, with nothing playing (mpv only starts on first play).
-    daemon = subprocess.Popen([CLI, "daemon"], env=env)
+    daemon = subprocess.Popen([CLI, "daemon"], env=env, umask=0o022)
     try:
         for _ in range(50):
             try:
@@ -142,7 +165,10 @@ with tempfile.TemporaryDirectory() as home:
                 return e.code
 
         token_file = os.path.join(home, "ytm-bar", "token")
-        assert os.stat(token_file).st_mode & 0o777 == 0o600
+        assert mode(token_file) == 0o600
+        # Recent searches and the queue are closed up when the service starts.
+        assert mode(state_dir) == 0o700
+        assert mode(state_dir / "state.json") == 0o600 and mode(state_dir / "session.json") == 0o600
         token = open(token_file).read()
         assert get({bar.HEADER: token}) == 204
         assert get({}) == 403  # a web page can't send the header
@@ -164,6 +190,8 @@ with tempfile.TemporaryDirectory() as home:
         assert cli("recentadd", "Nepathya")[1]["recent"] == ["Nepathya", "daft punk"]
         assert cli("recentadd", "DAFT PUNK")[1]["recent"] == ["DAFT PUNK", "Nepathya"]
         assert json.loads(Path(home, "state/ytm-bar/state.json").read_text())["recent"] == ["DAFT PUNK", "Nepathya"]
+        assert mode(state_dir / "state.json") == 0o600  # rewritten private, despite umask 022
+        assert sorted(f.name for f in state_dir.iterdir()) == ["session.json", "state.json"]  # no temp files left
         assert cli("recentclear") == (0, {"ok": True, "recent": []})
         assert cli("recentadd")[1]["code"] == "failed"
         assert cli("open", "mood")[1]["code"] == "failed" and cli("playall", "mood", "x")[1]["code"] == "failed"

@@ -660,9 +660,8 @@ class Player:
 
     def save(self):
         try:
-            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost,
-                                              "autoPause": self.auto_pause, "recent": self.recent_searches}))
+            write_private(STATE_FILE, json.dumps({"volume": self.volume, "eq": self.eq, "boost": self.boost,
+                                                  "autoPause": self.auto_pause, "recent": self.recent_searches}))
         except OSError:
             pass
 
@@ -1165,12 +1164,7 @@ class Player:
             raise ApiError("failed", "ytmusicapi isn't installed — run: omarchy pkg add python-ytmusicapi")
         except Exception as e:
             raise ApiError("unauthorized", f"Those headers didn't work: {e}")
-        CONFIG.mkdir(parents=True, exist_ok=True)
-        tmp = AUTH_FILE.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(auth)
-        tmp.replace(AUTH_FILE)
+        write_private(AUTH_FILE, auth)
         return {"loggedIn": True, "name": info.get("accountName") or ""}
 
     def logout(self, args):
@@ -1508,10 +1502,7 @@ class Player:
         if session == self._session:
             return
         try:
-            SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = SESSION_FILE.with_suffix(".tmp")
-            tmp.write_text(session)
-            tmp.replace(SESSION_FILE)
+            write_private(SESSION_FILE, session)
             self._session = session
         except OSError:
             pass
@@ -1612,6 +1603,7 @@ class Player:
 
 
 def serve():
+    make_private()
     player = Player()
 
     class Handler(BaseHTTPRequestHandler):
@@ -1718,15 +1710,39 @@ def read_token():
 
 def make_token():
     """A new secret for this run of the service, readable by this user alone."""
-    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(RUN_DIR, 0o700)
     token = secrets.token_hex(32)
-    tmp = RUN_DIR / f".token.{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(token)
-    os.replace(tmp, TOKEN_FILE)
+    write_private(TOKEN_FILE, token)
     return token
+
+
+def write_private(path, text):
+    """Replace a file with one only this user can read, in a folder only they
+    can open, whatever the umask: it holds the login, the token, or what you
+    search for and listen to."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def make_private():
+    """Close up what versions before 1.0.3 left readable by other accounts
+    (umask 022): the state folder, with recent searches and the queue, and
+    the config folder."""
+    for folder in (CONFIG, STATE_FILE.parent):
+        try:
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            os.chmod(folder, 0o700)
+            for item in folder.iterdir():
+                if item.is_file() and not item.is_symlink():
+                    os.chmod(item, 0o600)
+        except OSError:
+            pass
 
 
 def request(method, path, body=None, timeout=5):

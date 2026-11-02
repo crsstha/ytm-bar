@@ -9,6 +9,8 @@ Restart=on-failure
 # Stop only the service first, so it can save the queue and position
 # (session.json) while mpv is still running; it then quits mpv itself.
 KillMode=mixed
+# Anything it or mpv writes is this user's alone (recent searches, the queue).
+UMask=0077
 
 [Install]
 WantedBy=graphical-session.target
