@@ -31,6 +31,9 @@ import urllib.request
 
 PORT = int(os.environ.get("YTM_BAR_PORT", "26539"))
 API = f"http://127.0.0.1:{PORT}"
+# The service's secret (bin/ytm-bar make_token), sent with every request.
+TOKEN_FILE = os.path.join(os.environ["XDG_RUNTIME_DIR"], "ytm-bar", "token") if os.environ.get("XDG_RUNTIME_DIR") \
+    else os.path.expanduser("~/.config/ytm-bar/token")
 CLI = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ytm-bar")
 CARD_WIDTH = 84  # the design's 640px terminal at 12.5px Geist Mono
 
@@ -81,10 +84,18 @@ BARS = " ▁▂▃▄▅▆▇█"
 
 # ---- The service.
 
+def token():
+    try:
+        with open(TOKEN_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def call(command, args=(), timeout=10):
     body = json.dumps({"args": [str(a) for a in args]}).encode()
     req = urllib.request.Request(API + "/" + command, data=body, method="POST",
-                                 headers={"X-Ytm-Bar": "1", "Content-Type": "application/json"})
+                                 headers={"X-Ytm-Bar": token(), "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read() or b"{}")
@@ -94,7 +105,7 @@ def call(command, args=(), timeout=10):
 
 def get_song():
     """The current song, None when nothing is loaded, or "offline"."""
-    req = urllib.request.Request(API + "/song", headers={"X-Ytm-Bar": "1"})
+    req = urllib.request.Request(API + "/song", headers={"X-Ytm-Bar": token()})
     try:
         with urllib.request.urlopen(req, timeout=2) as resp:
             raw = resp.read()

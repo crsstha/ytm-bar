@@ -141,9 +141,13 @@ with tempfile.TemporaryDirectory() as home:
             except urllib.error.HTTPError as e:
                 return e.code
 
-        assert get({bar.HEADER: "1"}) == 204
+        token_file = os.path.join(home, "ytm-bar", "token")
+        assert os.stat(token_file).st_mode & 0o777 == 0o600
+        token = open(token_file).read()
+        assert get({bar.HEADER: token}) == 204
         assert get({}) == 403  # a web page can't send the header
-        assert get({bar.HEADER: "1", "Host": "evil.example:80"}) == 403  # DNS rebinding
+        assert get({bar.HEADER: "1"}) == 403  # another account can't read the secret
+        assert get({bar.HEADER: token, "Host": "evil.example:80"}) == 403  # DNS rebinding
 
         assert cli("song") == (0, {"ok": True, "song": None})
         code, state = cli("state")

@@ -318,7 +318,7 @@ Panel {
       if (done) done(result)
     }
     xhr.open("POST", root.api + "/" + command)
-    xhr.setRequestHeader("X-Ytm-Bar", "1")
+    xhr.setRequestHeader("X-Ytm-Bar", root.token())
     xhr.setRequestHeader("Content-Type", "application/json")
     xhr.send(JSON.stringify({ args: args || [] }))
   }
@@ -348,6 +348,9 @@ Panel {
       } else if (xhr.status === 204) {
         root.song = null
         root.status = "idle"
+      } else if (xhr.status === 403) {
+        // The service restarted with a new secret: read it for the next poll.
+        tokenFile.reload()
       } else {
         root.song = null
         root.status = "offline"
@@ -358,7 +361,7 @@ Panel {
       }
     }
     xhr.open("GET", root.api + "/song")
-    xhr.setRequestHeader("X-Ytm-Bar", "1")
+    xhr.setRequestHeader("X-Ytm-Bar", root.token())
     xhr.send()
   }
   property var pollRequest: null
@@ -378,6 +381,15 @@ Panel {
       }
     }
   }
+
+  // The service's secret (bin/ytm-bar make_token), sent with every request.
+  FileView {
+    id: tokenFile
+    path: (Quickshell.env("XDG_RUNTIME_DIR") ? Quickshell.env("XDG_RUNTIME_DIR") + "/ytm-bar"
+                                             : Quickshell.env("HOME") + "/.config/ytm-bar") + "/token"
+    printErrors: false
+  }
+  function token() { return tokenFile.loaded ? tokenFile.text().trim() : "" }
 
   function syncElapsed(reported, sameSong) {
     var now = Date.now()

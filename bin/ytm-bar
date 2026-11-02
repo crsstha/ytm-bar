@@ -52,10 +52,12 @@ and "code" ("offline", "unauthorized", "failed") when it didn't work.
 The live now-playing display polls GET /song directly from Panel.qml.
 """
 
+import hmac
 import json
 import os
 import random
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -77,6 +79,11 @@ API = f"http://127.0.0.1:{PORT}"
 # preflight, which the service never answers, so browsers can't drive it.
 HEADER = "X-Ytm-Bar"
 CONFIG = Path.home() / ".config/ytm-bar"
+# The header's value is a secret the service makes each time it starts, kept in
+# a file only this user can read: other accounts on the machine can reach the
+# port but can't use the service (or the signed-in session).
+RUN_DIR = Path(os.environ["XDG_RUNTIME_DIR"]) / "ytm-bar" if os.environ.get("XDG_RUNTIME_DIR") else CONFIG
+TOKEN_FILE = RUN_DIR / "token"
 AUTH_FILE = CONFIG / "browser.json"
 # "Sign in with Google" opens a Chromium window with this profile, kept for
 # ytm-bar alone, and reads the login from its cookies.
@@ -1619,7 +1626,8 @@ def serve():
 
         def allowed(self):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
-            if self.headers.get(HEADER) is None or host not in ("127.0.0.1", "localhost"):
+            sent = (self.headers.get(HEADER) or "").encode("latin-1", "replace")
+            if not hmac.compare_digest(sent, token.encode()) or host not in ("127.0.0.1", "localhost"):
                 self.reply(403, {"ok": False, "code": "failed", "error": "Forbidden"})
                 return False
             return True
@@ -1658,6 +1666,8 @@ def serve():
 
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     server.daemon_threads = True
+    # Only once the port is ours, so a second copy can't replace the secret.
+    token = make_token()
 
     def warm_up():
         # Fetch the home page now, so the popup's For you tab opens instantly.
@@ -1699,9 +1709,29 @@ def serve():
 
 # ---- The command line: a thin client of the service.
 
+def read_token():
+    try:
+        return TOKEN_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def make_token():
+    """A new secret for this run of the service, readable by this user alone."""
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(RUN_DIR, 0o700)
+    token = secrets.token_hex(32)
+    tmp = RUN_DIR / f".token.{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    os.replace(tmp, TOKEN_FILE)
+    return token
+
+
 def request(method, path, body=None, timeout=5):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method, headers={HEADER: "1"})
+    req = urllib.request.Request(API + path, data=data, method=method, headers={HEADER: read_token()})
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
