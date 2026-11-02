@@ -16,10 +16,17 @@ unlink_if_ours() {  # only remove links that point into this repo
 }
 
 remove_block() {
-  local target=$1
-  [[ -f $target ]] && grep -q ">>> $NAME >>>" "$target" || return 0
+  local target=$1 starts ends
+  [[ -f $target ]] && grep -q -e ">>> $NAME >>>" -e "<<< $NAME <<<" "$target" || return 0
+  # Only a whole block: with a marker missing, sed would delete to the end of the file.
+  starts="$(grep -n ">>> $NAME >>>" "$target" | cut -d: -f1 || true)"
+  ends="$(grep -n "<<< $NAME <<<" "$target" | cut -d: -f1 || true)"
+  if ! [[ $(wc -w <<<"$starts") == 1 && $(wc -w <<<"$ends") == 1 ]] || (( starts >= ends )); then
+    echo "    ! the ytm-bar marker lines in $target are damaged — remove that block by hand" >&2
+    return 0
+  fi
   # The block, and the blank line install.sh put before it.
-  sed -i -e "/^\$/{N;/\n.*>>> $NAME >>>/D}" -e "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
+  sed -i --follow-symlinks -e "/^\$/{N;/\n.*>>> $NAME >>>/D}" -e "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
   echo "    removed ytm-bar block from $target"
 }
 

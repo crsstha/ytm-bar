@@ -48,8 +48,10 @@ omarchy restart shell
 It adds:
 
 - **Blur behind the popup.** If Hyprland's blur is off (Omarchy's default), it
-  turns it on with app windows left unblurred, so only the popup changes.
-  `--no-blur` leaves Hyprland's blur as it is.
+  turns it on, with a window rule (`no_blur` for every window) that keeps app
+  windows unblurred, so only the popup changes. Blur rules of your own in
+  `looknfeel.lua` load later and still win. `--no-blur` leaves Hyprland's blur
+  as it is.
 - **`Super+Alt+M`** to open and close the player.
 - Floating windows for Sign in with Google and `ytm-tui`.
 - The `ytm-bar` and `ytm-tui` commands in `~/.local/bin`.
@@ -58,13 +60,30 @@ It adds:
 
 The Hyprland lines go in one block in `~/.config/hypr/bindings.lua`, between
 `ytm-bar` marker lines (`--no-bindings` leaves it out); `uninstall.sh` removes
-it. Nothing else in your
-configuration is changed.
+it. If those marker lines have been edited, both scripts leave the file alone
+and say so. Besides that block, `install.sh` only:
+
+- adds the widget to the bar, in `~/.config/omarchy/shell.json`, with `omarchy
+  plugin enable` (if it isn't there yet), and runs `hyprctl reload`;
+- removes the old ytm-bar block (between the same markers) that the Pear
+  Desktop version put in `~/.config/hypr/autostart.lua`;
+- restarts the player service when it's older than the files (after an
+  update); the music comes back paused, at the same spot.
 
 **Log in (optional)** — for likes, your library and a personal home page:
 ⚙ Settings → **Sign in with Google**. A small window opens on Google's sign-in
 page; once you're through to YouTube Music it closes by itself, within a few
 seconds. No Chromium? Use **Paste headers** instead.
+
+**What's kept, and where.** The login (YouTube Music's cookies) is in
+`~/.config/ytm-bar/browser.json`. The sign-in window keeps its own Chromium
+profile in `~/.config/ytm-bar/chromium`, still signed in to your Google account,
+so it can sign you back in when YouTube ends the login. Recent searches and the
+queue are in `~/.local/state/ytm-bar`. Only you can read any of it (folders
+`0700`, files `0600`). Keep `~/.config/ytm-bar` out of backups or dotfiles you
+share. **Log out** (Settings, or `ytm-bar logout`) deletes the login and the
+Chromium profile. None of it leaves the machine, except in requests to YouTube
+Music.
 
 ## Use
 

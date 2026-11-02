@@ -46,12 +46,25 @@ link() {  # link SOURCE TARGET — replace an existing link, back up a real file
   echo "    $dst -> $src"
 }
 
+block_intact() {  # block_intact TARGET — exactly one start marker, then one end marker
+  local target=$1 starts ends
+  starts="$(grep -n ">>> $NAME >>>" "$target" | cut -d: -f1 || true)"
+  ends="$(grep -n "<<< $NAME <<<" "$target" | cut -d: -f1 || true)"
+  if [[ $(wc -w <<<"$starts") == 1 && $(wc -w <<<"$ends") == 1 ]] && (( starts < ends )); then
+    return 0
+  fi
+  echo "    ! the ytm-bar marker lines in $target are damaged — fix or remove them by hand; left unchanged" >&2
+  return 1
+}
+
 add_block() {  # add_block SNIPPET TARGET — append between markers, replacing an older copy
   local snippet=$1 target=$2
   mkdir -p "$(dirname "$target")"
   touch "$target"
-  if grep -q ">>> $NAME >>>" "$target"; then
-    sed -i "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
+  if grep -q -e ">>> $NAME >>>" -e "<<< $NAME <<<" "$target"; then
+    block_intact "$target" || return 0
+    # --follow-symlinks: edit the file a dotfiles link points to, keep the link.
+    sed -i --follow-symlinks "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
     cat "$snippet" >>"$target"
     echo "    updated $target"
   else
@@ -63,8 +76,9 @@ add_block() {  # add_block SNIPPET TARGET — append between markers, replacing 
 
 remove_block() {
   local target=$1
-  [[ -f $target ]] && grep -q ">>> $NAME >>>" "$target" || return 0
-  sed -i "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
+  [[ -f $target ]] && grep -q -e ">>> $NAME >>>" -e "<<< $NAME <<<" "$target" || return 0
+  block_intact "$target" || return 0
+  sed -i --follow-symlinks "/>>> $NAME >>>/,/<<< $NAME <<</d" "$target"
   echo "    removed the old ytm-bar block from $target"
 }
 
@@ -89,13 +103,12 @@ echo "--> Player service"
 link "$REPO/systemd/ytm-bar.service" "$UNITS/ytm-bar.service"
 systemctl --user daemon-reload
 systemctl --user enable ytm-bar.service >/dev/null 2>&1
-# Don't restart a running service: that would interrupt the music (it comes back
-# paused, at the same spot).
-if systemctl --user is-active --quiet ytm-bar.service; then
-  echo "    ytm-bar.service is running — 'systemctl --user restart ytm-bar' loads a newer bin/ytm-bar (music resumes paused)"
+# A running service is restarted only when it's older than these files, so an
+# update's fixes take effect (the music comes back paused, at the same spot).
+if "$REPO/bin/ytm-bar" start >/dev/null; then
+  echo "    ytm-bar.service enabled and running this version"
 else
-  systemctl --user start ytm-bar.service
-  echo "    ytm-bar.service enabled and started"
+  echo "    ! the service didn't start — see: journalctl --user -u ytm-bar" >&2
 fi
 
 echo "--> Omarchy bar plugin ($PLUGIN_ID)"
