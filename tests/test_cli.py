@@ -24,6 +24,17 @@ assert bar.seconds_of("") == 0 and bar.seconds_of("live") == 0
 assert bar.clock(185) == "3:05"
 assert bar.video_id_of("https://music.youtube.com/watch?v=12rsVkwSsXU") == "12rsVkwSsXU"
 assert bar.video_id_of("https://example.com/a.mp3") is None
+assert bar.YTM_YTDL.name == "ytm-ytdl"
+
+ytdl_spec = spec_from_loader("ytm_ytdl", SourceFileLoader("ytm_ytdl", str(bar.YTM_YTDL)))
+ytdl = module_from_spec(ytdl_spec)
+ytdl_spec.loader.exec_module(ytdl)
+assert ytdl.seconds_until_available({"available_at": 100}, 90) == 10
+assert ytdl.seconds_until_available({"available_at": 50}, 90) == 0
+assert ytdl.seconds_until_available({"available_at": 1000}, 0) == ytdl.MAX_WAIT
+assert ytdl.seconds_until_available({}, 10) == 0
+assert ytdl.seconds_until_available(
+    {"available_at": 10, "requested_downloads": [{"available_at": 25}]}, 0) == 25
 
 # Album art asks for a bigger square; video thumbnails take the widest.
 assert bar.image_of({"thumbnails": [{"url": "https://lh3/x=w60-h60-l90-rj", "width": 60},

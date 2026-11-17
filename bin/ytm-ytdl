@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""yt-dlp for mpv's ytdl_hook. bin/ytm-bar points ytdl_path here.
+
+YouTube stamps each format with available_at and answers HTTP 403 until
+that time. mpv 0.41 requests the audio immediately, so the file never
+opens and later commands report "error running command". mpv master waits
+(mpv PR #18193, due in 0.42). This waits too, at most 30 seconds, then
+passes yt-dlp's JSON through unchanged.
+"""
+
+import json
+import subprocess
+import sys
+import time
+
+MAX_WAIT = 30  # seconds; never hold a song longer than this
+
+
+def seconds_until_available(info, now):
+    """How long to wait before the chosen format can be opened."""
+    times = [info.get("available_at") or 0]
+    for key in ("requested_formats", "requested_downloads"):
+        times += [fmt.get("available_at") or 0 for fmt in info.get(key) or []]
+    return min(MAX_WAIT, max(0.0, max(times) - now))
+
+
+def main():
+    out = subprocess.run(["yt-dlp", *sys.argv[1:]], stdout=subprocess.PIPE)
+    try:
+        info = json.loads(out.stdout)
+        time.sleep(seconds_until_available(info, time.time()))
+    except (ValueError, AttributeError, TypeError):
+        pass  # not JSON (an error, --version): pass it on as it is
+    sys.stdout.buffer.write(out.stdout)
+    sys.exit(out.returncode)
+
+
+if __name__ == "__main__":
+    main()
