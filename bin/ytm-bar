@@ -164,6 +164,8 @@ def peer_is_me(client_port):
     return any(local == client_port and remote == PORT and uid == os.getuid()
                for local, remote, _, uid in tcp_sockets())
 WATCH_URL = "https://music.youtube.com/watch?v="
+# mpv 0.41 opens YouTube before available_at and gets HTTP 403. This wrapper waits.
+YTM_YTDL = Path(__file__).resolve().parent / "ytm-ytdl"
 QUEUE_LIMIT = 100  # songs after the current one sent to the popup and ytm-tui
 RADIO_LIMIT = 25
 RADIO_AHEAD = 3  # fetch more radio when this few songs are left
@@ -588,6 +590,8 @@ class Mpv:
             f"--input-ipc-server={MPV_SOCKET}", "--ytdl-format=bestaudio/best",
             "--prefetch-playlist=yes", f"--volume={volume}", f"--volume-max={BOOST_MAX}",
             f"--audio-client-name={AUDIO_CLIENT}",
+            # Waits until YouTube makes the audio available (see bin/ytm-ytdl).
+            f"--script-opts=ytdl_hook-ytdl_path={YTM_YTDL}",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 10
         while True:
